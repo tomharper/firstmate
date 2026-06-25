@@ -142,6 +142,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
 - **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
   The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+- **Lifecycle claims are provable** - an optional formal completeness gate (`bin/fm-completeness-check.sh`, Z3-backed) wires into teardown and the local merge to prove each done/teardown/merge claim consistent with the directives before the irreversible step.
+  Bootstrap reports it as available only when `python3` can import `z3`; when the solver is absent the gate fails open and the existing bash safety checks remain the hard guarantee.
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
@@ -161,7 +163,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
+| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after the captain's approval is asserted via `FM_CAPTAIN_APPROVED`  |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line |
@@ -173,6 +175,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |
+| `fm-completeness-check.sh` | Formal completeness gate wired into teardown and the local merge: proves a done/teardown/merge claim consistent with the directives (Z3-backed via `fm-completeness.py` + `fm-completeness.rules.json`); fails open when the solver is absent |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
 
@@ -227,6 +230,11 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watche
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+# formal completeness gate (bin/fm-completeness-check.sh); optional, fails open without z3
+FM_COMPLETENESS_GATE=1     # set to 0 to skip the gate entirely (always exits 0)
+FM_COMPLETENESS_STRICT=0   # set to 1 to refuse instead of fail open when the solver tooling is absent/broken
+FM_COMPLETENESS_RULES=     # optional override for the rules file (default bin/fm-completeness.rules.json)
+FM_CAPTAIN_APPROVED=       # assert the captain's merge approval at the merge gate: granted|yes|1|true, or not_required under yolo
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
@@ -271,6 +279,7 @@ tests/fm-spawn-batch.test.sh              # fm-spawn.sh batch (id=repo) argument
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
+tests/fm-completeness.test.sh             # completeness gate: off-switch, fail-open, strict enforcement, argument parsing, and (when z3 imports) the SAT/UNSAT invariant matrix plus --id derivation
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then "heartbeat")

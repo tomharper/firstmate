@@ -38,7 +38,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Everything personal to one captain's fleet (`data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` uses it for routine backlog mutations.
   It does not make `data/` tracked.
-- Helper scripts in `bin/` are plain bash.
+- Helper scripts in `bin/` are plain bash, with one exception: `fm-completeness.py` is the optional Z3-backed completeness engine driven by `fm-completeness-check.sh`.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
