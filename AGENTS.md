@@ -62,6 +62,7 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
+  fm-completeness-check.sh  formal completeness gate: proves a task's done/teardown/merge claim consistent with the directives (Z3-backed via fm-completeness.py + fm-completeness.rules.json). Wired into fm-teardown.sh and fm-merge-local.sh; FAILS OPEN when the solver tooling is absent, so it never wedges the lifecycle and the existing bash checks remain the hard guarantee. Off-switch: FM_COMPLETENESS_GATE=0; enforce-when-broken: FM_COMPLETENESS_STRICT=1
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
@@ -264,6 +265,8 @@ With `yolo` on, firstmate decides those routine gates and merges only green or o
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
+The `local-only` merge additionally requires an explicit `FM_CAPTAIN_APPROVED` assertion (`granted`, or `not_required` under `yolo`), because that merge is firstmate exercising the captain's merge authority directly.
+It is the completeness gate's directive-#2 check: without the assertion the gate blocks the merge when the solver tooling is present, and fails open when it is absent.
 
 ### Validate
 
