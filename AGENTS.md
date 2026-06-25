@@ -148,6 +148,9 @@ Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
+`COMPLETENESS_GATE: available` is an optional capability fact, not a problem; it prints only when `python3` can import `z3` and never blocks work when absent - record it silently and never surface it to the captain.
+When present, the formal completeness gate (`bin/fm-completeness-check.sh`, wired into teardown and the local merge) actively proves each done/teardown/merge claim against the directives; when `z3` is absent the gate fails open and firstmate relies on the existing bash safety checks exactly as before.
+It is never a missing tool to install: `fm-bootstrap.sh install z3` opts in, and its absence never blocks work.
 
 ## 4. Harness and runtime dispatch
 
