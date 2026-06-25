@@ -3,11 +3,11 @@
 #
 # Two tiers:
 #   - Tooling-agnostic (always run): the off-switch, fail-open behavior, strict
-#     enforcement, argument parsing. These must hold even where the Z3-backed
-#     neurosymbolic-evaluator is not installed (e.g. CI), because the gate is
-#     designed to FAIL OPEN and never wedge the lifecycle.
-#   - Solver-dependent (run only when neurosymbolic-evaluator + z3 import): the
-#     actual SAT/UNSAT verdicts for the invariant matrix.
+#     enforcement, argument parsing. These must hold even where z3 is not
+#     installed (e.g. CI), because the gate is designed to FAIL OPEN and never
+#     wedge the lifecycle.
+#   - Solver-dependent (run only when z3 imports): the actual SAT/UNSAT verdicts
+#     for the invariant matrix.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,9 +63,9 @@ fi
 
 # --- Solver-dependent tier ---------------------------------------------------
 
-if ! python3 -c "import neurosymbolic_evaluator, z3" >/dev/null 2>&1; then
-  skip "solver matrix (neurosymbolic-evaluator/z3 not importable)"
-  skip "solver --id derivation (neurosymbolic-evaluator/z3 not importable)"
+if ! python3 -c "import z3" >/dev/null 2>&1; then
+  skip "solver matrix (z3 not importable)"
+  skip "solver --id derivation (z3 not importable)"
   exit 0
 fi
 

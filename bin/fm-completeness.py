@@ -3,14 +3,22 @@
 
 Firstmate's "is this task done / safe to tear down / clear to merge?" calls are
 really invariants (AGENTS.md prime directives #2 and #3). This turns them into a
-formal rule set checked by the Z3-backed neurosymbolic-evaluator: firstmate
-proposes a completion claim with the observed facts, and the solver PROVES it
-either SAT (consistent with every invariant) or UNSAT (provably premature, with
-the violated rule named). Hard rules gate; soft rules score (never block).
+formal rule set checked by Z3: firstmate proposes a completion claim with the
+observed facts, and the solver PROVES it either SAT (consistent with every
+invariant) or UNSAT (provably premature, with the violated rule named). Hard
+rules gate; soft rules score (never block).
 
-The rules are DATA, not code: they load from fm-completeness.rules.json (or
-$FM_COMPLETENESS_RULES). This module only translates that data into the
-evaluator's custom-rule callbacks and runs the check.
+The only dependency is `z3-solver` (public PyPI) — there is no other library to
+install. The rules are DATA, not code: they load from fm-completeness.rules.json
+(or $FM_COMPLETENESS_RULES). This module is a small self-contained shim that
+compiles that data into a Z3 model and runs the check.
+
+Encoding: each axis is a Z3 EnumSort variable. A hard rule compiles to
+`Implies(when, require AND not-forbid)`. A concrete claim is verified by asking,
+per rule, whether (facts AND rule) is satisfiable — UNSAT means that rule is
+violated by the facts. `prove_consistency` checks the whole hard rule set is
+satisfiable over free axes (a contradiction there is a bug in the directives,
+not the task). Soft rules score deterministically over the concrete metadata.
 
 I/O: reads one JSON object of facts on stdin, e.g.
     {"name": "fix-x", "kind": "ship", "landed": "none",
@@ -41,92 +49,119 @@ def _default_rules_path() -> str:
                         "fm-completeness.rules.json")
 
 
-def _applies(axes: dict, when: dict) -> bool:
-    """A rule with a `when` clause applies only when every condition matches."""
-    return all(axes.get(k) == v for k, v in when.items())
+def _build_axes(z3, axes_spec):
+    """Compile each axis into a Z3 EnumSort plus its value-constant map."""
+    consts = {}   # axis -> {value_str: z3 const}
+    variables = {}  # axis -> z3 Const (the proposed value of that axis)
+    for axis, values in axes_spec.items():
+        values = list(values)
+        _sort, members = z3.EnumSort(axis, values)
+        consts[axis] = dict(zip(values, members))
+        variables[axis] = z3.Const(axis + "__proposed", _sort)
+    return consts, variables
 
 
-def _make_hard_check(rule: dict):
+def _rule_constraint(z3, rule, consts, variables):
+    """Compile one hard rule to Implies(when, require AND not-forbid)."""
     when = rule.get("when", {})
     require = rule.get("require", {})
     forbid = rule.get("forbid", {})
-    reason = rule["reason"]
 
-    def check(pred, _vocab):
-        axes = pred.axes
-        if not _applies(axes, when):
-            return None
-        for key, val in require.items():
-            if axes.get(key) != val:
-                return reason
-        for key, val in forbid.items():
-            if axes.get(key) == val:
-                return reason
-        return None
+    antecedent = [variables[k] == consts[k][v] for k, v in when.items()]
+    consequent = [variables[k] == consts[k][v] for k, v in require.items()]
+    consequent += [variables[k] != consts[k][v] for k, v in forbid.items()]
 
-    return check
+    body = z3.And(*consequent) if consequent else z3.BoolVal(True)
+    if antecedent:
+        return z3.Implies(z3.And(*antecedent), body)
+    return body
 
 
-def _make_soft_check(rule: dict):
-    when = rule.get("when", {})
-    meta_key = rule.get("require_meta")
-    reason = rule["reason"]
+def _verify_hard(z3, spec, fact_axes, consts, variables):
+    """Return the list of hard rules whose constraint is violated by the facts.
 
-    def check(pred, _vocab):
-        if not _applies(pred.axes, when):
-            return None
-        if meta_key is not None and pred.metadata.get(meta_key):
-            return None
-        return reason
-
-    return check
-
-
-def build_vocabulary(spec: dict):
-    """Translate the rules data file into a verified Vocabulary."""
-    from neurosymbolic_evaluator import Vocabulary
-
-    vocab = Vocabulary(spec.get("name", "firstmate_task_completeness"))
-    for axis, values in spec.get("axes", {}).items():
-        vocab.add_axis(axis, list(values))
+    A rule is violated iff (facts AND rule) is UNSAT — i.e. no world with these
+    facts can also satisfy the rule. Checking per rule names every violation,
+    not just one minimal unsat core.
+    """
+    fact_asserts = [variables[k] == consts[k][v] for k, v in fact_axes.items()]
+    violated = []
     for rule in spec.get("hard_rules", []):
-        vocab.add_custom_rule(rule["name"], _make_hard_check(rule))
+        solver = z3.Solver()
+        for assertion in fact_asserts:
+            solver.add(assertion)
+        solver.add(_rule_constraint(z3, rule, consts, variables))
+        if solver.check() == z3.unsat:
+            violated.append(rule)
+    return violated
+
+
+def _score_soft(spec, fact_axes, metadata):
+    """Deterministic weighted compliance over concrete metadata (never gates)."""
+    total = 0
+    satisfied = 0
+    unmet = []
     for rule in spec.get("soft_rules", []):
-        vocab.add_custom_soft_rule(
-            rule["name"], _make_soft_check(rule), weight=int(rule.get("weight", 1)))
-    return vocab
+        when = rule.get("when", {})
+        if any(fact_axes.get(k) != v for k, v in when.items()):
+            continue  # rule does not apply to this proposal
+        weight = int(rule.get("weight", 1))
+        total += weight
+        key = rule.get("require_meta")
+        if key is not None and metadata.get(key):
+            satisfied += weight
+        else:
+            unmet.append(rule["name"])
+    compliance = 1.0 if total == 0 else satisfied / total
+    return compliance, unmet
+
+
+def prove_consistency(z3, spec, consts, variables) -> bool:
+    """True iff the whole hard rule set is satisfiable over free axis values."""
+    solver = z3.Solver()
+    for rule in spec.get("hard_rules", []):
+        solver.add(_rule_constraint(z3, rule, consts, variables))
+    return solver.check() == z3.sat
 
 
 def check(spec: dict, facts: dict) -> dict:
-    vocab = build_vocabulary(spec)
+    import z3  # public PyPI z3-solver; absence -> ImportError -> caller fails open
 
-    name = facts.get("name", "task")
     mode = facts.get("mode", "strict")
     metadata = facts.get("metadata", {}) or {}
-    declared_axes = set(spec.get("axes", {}))
-    axis_values = {k: v for k, v in facts.items()
-                   if k not in ("name", "mode", "metadata") and k in declared_axes}
+    declared = spec.get("axes", {})
+    fact_axes = {k: v for k, v in facts.items()
+                 if k not in ("name", "mode", "metadata") and k in declared}
 
-    # Reject axis values the data file never declared — a typo'd fact must surface
-    # as a tooling error, not silently pass the gate.
-    for axis, value in axis_values.items():
-        if value not in spec["axes"][axis]:
+    # A fact whose value the data file never declared is a typo, not a pass.
+    for axis, value in fact_axes.items():
+        if value not in declared[axis]:
             raise ValueError(
                 "fact %s=%r is not a declared value of axis %s (%s)"
-                % (axis, value, axis, ", ".join(spec["axes"][axis])))
+                % (axis, value, axis, ", ".join(declared[axis])))
+
+    consts, variables = _build_axes(z3, declared)
+
+    violated = _verify_hard(z3, spec, fact_axes, consts, variables)
+    sat = not violated
 
     if mode == "graded":
-        result = vocab.verify_extension_graded(name, metadata=metadata, **axis_values)
+        compliance, unmet = _score_soft(spec, fact_axes, metadata)
     else:
-        result = vocab.verify_extension(name, metadata=metadata, **axis_values)
+        compliance, unmet = 1.0, []
+
+    if sat:
+        reason = "consistent with every invariant"
+    else:
+        reason = "; ".join("[%s] %s" % (r["name"], r["reason"]) for r in violated)
 
     return {
-        "sat": bool(result.sat),
-        "reason": result.reason,
-        "violated_rules": list(result.violated_rules),
-        "counterexample": result.counterexample,
-        "compliance": getattr(result, "compliance", 1.0),
-        "unmet_soft": list(getattr(result, "unmet_soft", [])),
+        "sat": bool(sat),
+        "reason": reason,
+        "violated_rules": [r["name"] for r in violated],
+        "counterexample": None,
+        "compliance": compliance,
+        "unmet_soft": unmet,
         "mode": mode,
     }
 
@@ -151,8 +186,8 @@ def main() -> int:
     try:
         out = check(spec, facts)
     except ImportError as exc:
-        print(json.dumps({"error": "neurosymbolic-evaluator not importable: %s"
-                          % exc}), file=sys.stderr)
+        print(json.dumps({"error": "z3-solver not importable: %s" % exc}),
+              file=sys.stderr)
         return EXIT_ERROR
     except (ValueError, KeyError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
