@@ -69,6 +69,7 @@ README.md            public overview and development notes
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
+  fm-completeness-check.sh  formal completeness gate: proves a task's done/teardown/merge claim consistent with the directives (Z3-backed via fm-completeness.py + fm-completeness.rules.json). Wired into fm-teardown.sh and fm-merge-local.sh; FAILS OPEN when the solver tooling is absent, so it never wedges the lifecycle and the existing bash checks remain the hard guarantee. Off-switch: FM_COMPLETENESS_GATE=0; enforce-when-broken: FM_COMPLETENESS_STRICT=1
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -339,7 +340,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
-- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
+- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). The `FM_CAPTAIN_APPROVED` assertion is the completeness gate's directive-#2 check: the merge is firstmate exercising the captain's merge authority, so the approval must be asserted explicitly (`granted`, or `not_required` under yolo); without it the gate blocks the merge when the solver tooling is present, and fails open (proceeds) when it is absent. No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.

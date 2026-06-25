@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Tests for bin/fm-completeness-check.sh (the formal completeness gate).
+#
+# Two tiers:
+#   - Tooling-agnostic (always run): the off-switch, fail-open behavior, strict
+#     enforcement, argument parsing. These must hold even where the Z3-backed
+#     neurosymbolic-evaluator is not installed (e.g. CI), because the gate is
+#     designed to FAIL OPEN and never wedge the lifecycle.
+#   - Solver-dependent (run only when neurosymbolic-evaluator + z3 import): the
+#     actual SAT/UNSAT verdicts for the invariant matrix.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GATE="$ROOT/bin/fm-completeness-check.sh"
+TMP_ROOT=
+
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+pass() { printf 'ok - %s\n' "$1"; }
+skip() { printf 'ok - %s # SKIP\n' "$1"; }
+
+cleanup() { [ -n "${TMP_ROOT:-}" ] && rm -rf "$TMP_ROOT"; }
+trap cleanup EXIT
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-completeness-tests.XXXXXX")
+
+# rc_of runs the gate with the given args and echoes its exit code (never aborts).
+rc_of() {
+  set +e
+  "$GATE" "$@" >/dev/null 2>&1
+  local rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+# --- Tooling-agnostic tier ---------------------------------------------------
+
+# Off-switch always yields 0 regardless of facts.
+if [ "$(FM_COMPLETENESS_GATE=0 "$GATE" --kind scout --report absent >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "off-switch FM_COMPLETENESS_GATE=0 exits 0"
+else
+  fail "off-switch did not exit 0"
+fi
+
+# Fail-open: a broken rules path is non-fatal by default.
+if [ "$(FM_COMPLETENESS_RULES=/no/such.json "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "fail-open on missing rules file exits 0"
+else
+  fail "missing rules file did not fail open"
+fi
+
+# Strict mode turns the same breakage into a hard error (exit 3).
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES=/no/such.json "$GATE" --kind scout --report present >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "FM_COMPLETENESS_STRICT=1 enforces (exit 3) on tooling breakage"
+else
+  fail "strict mode did not enforce on tooling breakage"
+fi
+
+# Unknown argument is a usage error.
+if [ "$(rc_of --bogus x)" = "64" ]; then
+  pass "unknown argument exits 64"
+else
+  fail "unknown argument did not exit 64"
+fi
+
+# --- Solver-dependent tier ---------------------------------------------------
+
+if ! python3 -c "import neurosymbolic_evaluator, z3" >/dev/null 2>&1; then
+  skip "solver matrix (neurosymbolic-evaluator/z3 not importable)"
+  skip "solver --id derivation (neurosymbolic-evaluator/z3 not importable)"
+  exit 0
+fi
+
+assert_rc() {
+  local want=$1 desc=$2; shift 2
+  local got; got=$(rc_of "$@")
+  if [ "$got" = "$want" ]; then pass "$desc"; else fail "$desc (rc=$got want=$want)"; fi
+}
+
+# Hard invariants gate (exit 2 = UNSAT/blocked, 0 = SAT/clear).
+assert_rc 2 "scout without report is blocked"          --kind scout --report absent
+assert_rc 0 "scout with report clears"                 --kind scout --report present
+assert_rc 2 "ship not landed is blocked"               --kind ship --landed none --worktree holds_unlanded_work
+assert_rc 0 "ship pushed + clean clears"               --kind ship --landed pushed --worktree clean
+assert_rc 2 "merge without approval is blocked"        --gate merge --kind ship --landed merged --captain-approval pending
+assert_rc 0 "merge with approval clears"               --gate merge --kind ship --landed merged --captain-approval granted
+
+# Merge gate reads approval from the environment (directive #2 explicit assert).
+if [ "$(FM_CAPTAIN_APPROVED=granted "$GATE" --gate merge --kind ship --landed merged >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "merge gate honors FM_CAPTAIN_APPROVED=granted"
+else
+  fail "merge gate did not honor FM_CAPTAIN_APPROVED=granted"
+fi
+if [ "$("$GATE" --gate merge --kind ship --landed merged >/dev/null 2>&1; echo $?)" = "2" ]; then
+  pass "merge gate blocks when approval unset (defaults pending)"
+else
+  fail "merge gate did not block with approval unset"
+fi
+
+# Graded mode never blocks on a soft-only miss, but reports it.
+assert_rc 0 "graded ship is SAT despite unmet soft rules" \
+  --mode graded --kind ship --landed merged --captain-approval granted --worktree clean
+
+# --id derivation from a synthetic meta + report.
+HOME_DIR="$TMP_ROOT/home"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/scout-x"
+printf 'kind=scout\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$TMP_ROOT/wt" "$TMP_ROOT/proj" > "$HOME_DIR/state/scout-x.meta"
+# No report yet -> blocked.
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id scout-x >/dev/null 2>&1; echo $?)" = "2" ]; then
+  pass "--id scout derivation blocks with no report"
+else
+  fail "--id scout derivation did not block without report"
+fi
+# Write the report -> clears.
+printf '# report\n' > "$HOME_DIR/data/scout-x/report.md"
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id scout-x >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "--id scout derivation clears once report exists"
+else
+  fail "--id scout derivation did not clear with report present"
+fi

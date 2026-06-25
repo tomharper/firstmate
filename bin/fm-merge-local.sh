@@ -40,6 +40,22 @@ default_branch() {
   return 1
 }
 
+# Formal completeness gate (directive #2): the local merge IS firstmate exercising
+# the captain's merge authority, so the captain's word must be asserted explicitly
+# via $FM_CAPTAIN_APPROVED (granted | yes | 1 | true; or not_required under yolo).
+# The gate FAILS OPEN when the solver tooling is absent, so existing setups keep
+# working until they install it; once installed, an unasserted approval is blocked.
+set +e
+gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
+gate_rc=$?
+set -e
+if [ "$gate_rc" = 2 ]; then
+  printf '%s\n' "$gate_out" >&2
+  echo "REFUSED: completeness gate blocked the local merge of $ID." >&2
+  echo "Assert the captain's approval explicitly, e.g. FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID" >&2
+  exit 1
+fi
+
 BRANCH="fm/$ID"
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 

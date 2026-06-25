@@ -415,6 +415,23 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
+# Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
+# with the directives before the irreversible teardown. It FAILS OPEN when the
+# solver tooling is absent, so the battle-tested bash checks below remain the hard
+# guarantee; when present it gives a provable, named refusal first. Skipped under
+# --force (the explicit discard path) and for secondmates (governed elsewhere).
+if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  set +e
+  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
+  gate_rc=$?
+  set -e
+  if [ "$gate_rc" = 2 ]; then
+    printf '%s\n' "$gate_out" >&2
+    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
+    exit 1
+  fi
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
