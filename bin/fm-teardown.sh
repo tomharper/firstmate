@@ -425,7 +425,7 @@ if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; 
   gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
   gate_rc=$?
   set -e
-  if [ "$gate_rc" = 2 ]; then
+  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
     printf '%s\n' "$gate_out" >&2
     echo "REFUSED: completeness gate blocked teardown of $ID." >&2
     exit 1

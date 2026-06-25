@@ -49,7 +49,7 @@ set +e
 gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
 gate_rc=$?
 set -e
-if [ "$gate_rc" = 2 ]; then
+if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
   printf '%s\n' "$gate_out" >&2
   echo "REFUSED: completeness gate blocked the local merge of $ID." >&2
   echo "Assert the captain's approval explicitly, e.g. FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID" >&2
