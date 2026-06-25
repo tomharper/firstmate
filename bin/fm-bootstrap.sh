@@ -17,6 +17,14 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          z3 (z3-solver) is an OPTIONAL capability that powers the formal
+#          completeness gate (bin/fm-completeness-check.sh); reported only when
+#          python3 can import z3. It is never a MISSING line and never prompts an
+#          install - the gate fails open without it. Opt in with
+#          "fm-bootstrap.sh install z3". Like tasks-axi, it is a non-actionable
+#          capability fact: reported only as "BOOTSTRAP_INFO: completeness gate
+#          available" under FM_BOOTSTRAP_VERBOSE_FACTS=1, so a clean bootstrap
+#          stays silent.
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -428,6 +436,7 @@ install_cmd() {
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    z3) echo "python3 -m pip install z3-solver" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -798,6 +807,10 @@ crew_dispatch_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
+fi
+if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
+  && command -v python3 >/dev/null 2>&1 && python3 -c 'import z3' >/dev/null 2>&1; then
+  echo "BOOTSTRAP_INFO: completeness gate available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
