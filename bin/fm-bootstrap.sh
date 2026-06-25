@@ -5,7 +5,12 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
-#                 "TASKS_AXI: available".
+#                 "TASKS_AXI: available", "COMPLETENESS_GATE: available".
+#          z3 (z3-solver) is an OPTIONAL capability that powers the formal
+#          completeness gate (bin/fm-completeness-check.sh); reported only when
+#          python3 can import z3. It is never a MISSING line and never prompts an
+#          install - the gate fails open without it. Opt in with
+#          "fm-bootstrap.sh install z3".
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
@@ -69,6 +74,7 @@ install_cmd() {
     tmux|node|gh) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    z3) echo "python3 -m pip install z3-solver" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     *) return 1 ;;
   esac
@@ -103,5 +109,8 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import z3' >/dev/null 2>&1; then
+  echo "COMPLETENESS_GATE: available"
+fi
 fleet_sync
 exit 0

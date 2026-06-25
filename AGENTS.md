@@ -114,6 +114,10 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and use section 10 for backlog mutations.
   It prints only after the `tasks-axi` compatibility probe passes for version 0.1.1 or newer; absence or incompatibility only falls back to hand-editing and never blocks work.
+- `COMPLETENESS_GATE: available` - an optional capability fact, not a problem; record it silently and never surface it to the captain.
+  Bootstrap prints this only when `python3` can import `z3`.
+  When present, the formal completeness gate (`bin/fm-completeness-check.sh`, wired into teardown and the local merge) actively proves each done/teardown/merge claim against the directives; when `z3` is absent the gate fails open and firstmate relies on the existing bash safety checks exactly as before.
+  It is never a missing tool to install: `fm-bootstrap.sh install z3` opts in, and its absence never blocks work.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 
