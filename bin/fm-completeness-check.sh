@@ -80,7 +80,17 @@ git_unlanded_facts() {
   # the script it guards. Sets LANDED and WORKTREE for a ship task.
   local wt=$1 proj=$2 mode=$3 dirty unpushed default unmerged
   if [ ! -d "$wt" ]; then
-    LANDED="${LANDED:-none}"; WORKTREE="${WORKTREE:-clean}"; return 0
+    # No worktree on disk means there is nothing to discard, exactly as
+    # fm-teardown.sh skips its unlanded check when [ ! -d "$WT" ]. Resolve to a
+    # non-blocking state: clean worktree and a landed value that clears
+    # SHIP_REQUIRES_LANDED, rather than landed=none which would false-block.
+    if [ "$mode" = "local-only" ]; then
+      LANDED="${LANDED:-local_merged}"
+    else
+      LANDED="${LANDED:-pushed}"
+    fi
+    WORKTREE="${WORKTREE:-clean}"
+    return 0
   fi
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
   unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
