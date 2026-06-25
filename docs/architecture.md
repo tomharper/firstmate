@@ -242,6 +242,13 @@ The update is fast-forward only: dirty, diverged, offline, and off-default targe
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+## Lifecycle claims are provable
+
+An optional formal completeness gate (`bin/fm-completeness-check.sh`, Z3-backed via `fm-completeness.py` and `fm-completeness.rules.json`) wires into `fm-teardown.sh` and `fm-merge-local.sh` to prove each done/teardown/merge claim consistent with the directives before the irreversible step.
+Bootstrap reports it as available only when `python3` can import `z3`; when the solver is absent the gate fails open and the existing bash safety checks remain the hard guarantee.
+`FM_COMPLETENESS_GATE=0` disables it entirely; `FM_COMPLETENESS_STRICT=1` refuses instead of failing open when the solver tooling is absent or broken.
+A local-only merge asserts the captain's approval explicitly via `FM_CAPTAIN_APPROVED` (`granted`, or `not_required` under yolo); without it the gate blocks the merge when the solver is present.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
