@@ -76,47 +76,43 @@ command -v python3 >/dev/null 2>&1 || fail_open "python3 not found"
 [ -f "$ENGINE" ] || fail_open "engine $ENGINE missing"
 
 git_unlanded_facts() {
-  # Mirror fm-teardown.sh's notion of "landed" so the gate never diverges from
-  # the script it guards. Sets LANDED and WORKTREE for a ship task.
-  local wt=$1 proj=$2 mode=$3 dirty unpushed default unmerged
+  # Sets LANDED and WORKTREE for a ship task.
+  #
+  # The gate does NOT determine whether ship work has landed. AGENTS.md hard rule
+  # #3 makes bin/fm-teardown.sh the single owner of the complete landed-work test,
+  # and that test is genuinely richer than anything this gate can restate: it
+  # recognizes squash-merged PRs whose commits are unreachable from every remote,
+  # resolves the PR from recorded pr= or by branch lookup, falls back to a content
+  # check against the default branch, and fails safe when GitHub is inconclusive.
+  # This function used to re-derive "landed" from plain ref reachability and called
+  # that a mirror of teardown; once teardown learned squash-merge detection the
+  # copy silently diverged and false-blocked provably-landed work. Deriving it
+  # twice is the bug, so for ship teardown the gate defers the whole question and
+  # lets teardown's own check be the hard guarantee - which is also the gate's
+  # stated fail-open philosophy.
+  #
+  # What the gate still owns here is the one invariant that is independent of
+  # landedness: a DIRTY worktree holds uncommitted work that no merge, push, or PR
+  # can have captured, so teardown would discard it outright. Teardown agrees
+  # ("dirty wins" even when the work landed), and this needs no landed test.
+  local wt=$1 mode=$2 dirty
+  # Explicit --landed/--worktree flags still win; these are only defaults.
+  if [ "$mode" = "local-only" ]; then
+    LANDED="${LANDED:-local_merged}"
+  else
+    LANDED="${LANDED:-pushed}"
+  fi
   if [ ! -d "$wt" ]; then
     # No worktree on disk means there is nothing to discard, exactly as
-    # fm-teardown.sh skips its unlanded check when [ ! -d "$WT" ]. Resolve to a
-    # non-blocking state: clean worktree and a landed value that clears
-    # SHIP_REQUIRES_LANDED, rather than landed=none which would false-block.
-    if [ "$mode" = "local-only" ]; then
-      LANDED="${LANDED:-local_merged}"
-    else
-      LANDED="${LANDED:-pushed}"
-    fi
+    # fm-teardown.sh skips its unlanded check when [ ! -d "$WT" ].
     WORKTREE="${WORKTREE:-clean}"
     return 0
   fi
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
-  unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
-  if [ "$mode" = "local-only" ]; then
-    default=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
-    [ -n "$default" ] || default=main
-    unmerged=$(git -C "$wt" log --oneline HEAD --not "$default" -- 2>/dev/null | head -1 || true)
-    if [ -z "$unmerged" ]; then
-      LANDED="${LANDED:-local_merged}"
-    elif [ -z "$unpushed" ]; then
-      LANDED="${LANDED:-pushed}"
-    else
-      LANDED="${LANDED:-none}"
-    fi
-    if [ -n "$dirty" ] || { [ -n "$unmerged" ] && [ -n "$unpushed" ]; }; then
-      WORKTREE="${WORKTREE:-holds_unlanded_work}"
-    else
-      WORKTREE="${WORKTREE:-clean}"
-    fi
+  if [ -n "$dirty" ]; then
+    WORKTREE="${WORKTREE:-holds_unlanded_work}"
   else
-    if [ -z "$unpushed" ]; then LANDED="${LANDED:-pushed}"; else LANDED="${LANDED:-none}"; fi
-    if [ -n "$dirty" ] || [ -n "$unpushed" ]; then
-      WORKTREE="${WORKTREE:-holds_unlanded_work}"
-    else
-      WORKTREE="${WORKTREE:-clean}"
-    fi
+    WORKTREE="${WORKTREE:-clean}"
   fi
 }
 
@@ -127,9 +123,8 @@ if [ -n "$ID" ]; then
     [ -n "$KIND" ] || KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
     meta_mode=$(grep '^mode=' "$META" | cut -d= -f2- || true)
     wt=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
-    proj=$(grep '^project=' "$META" | cut -d= -f2- || true)
   else
-    meta_mode=""; wt=""; proj=""
+    meta_mode=""; wt=""
   fi
   [ -n "$KIND" ] || KIND=ship
   [ -n "$meta_mode" ] || meta_mode=no-mistakes
@@ -149,7 +144,7 @@ if [ -n "$ID" ]; then
         # Scout carve-out: the report governs, the worktree is scratch by contract.
         LANDED="${LANDED:-none}"; WORKTREE="${WORKTREE:-clean}"; APPROVAL="${APPROVAL:-not_required}"
       elif [ "$KIND" = ship ]; then
-        git_unlanded_facts "$wt" "$proj" "$meta_mode"
+        git_unlanded_facts "$wt" "$meta_mode"
         APPROVAL="${APPROVAL:-not_required}"
       else
         LANDED="${LANDED:-none}"; WORKTREE="${WORKTREE:-clean}"; APPROVAL="${APPROVAL:-not_required}"

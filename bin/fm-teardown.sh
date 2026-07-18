@@ -1043,23 +1043,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
-# Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
-# with the directives before the irreversible teardown. It FAILS OPEN when the
-# solver tooling is absent, so the battle-tested bash checks below remain the hard
-# guarantee; when present it gives a provable, named refusal first. Skipped under
-# --force (the explicit discard path) and for secondmates (governed elsewhere).
-if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
-  set +e
-  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
-  gate_rc=$?
-  set -e
-  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
-    printf '%s\n' "$gate_out" >&2
-    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
-    exit 1
-  fi
-fi
-
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
@@ -1096,6 +1079,28 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+# Formal completeness gate (AGENTS.md section 7): a BACKSTOP that proves the
+# "done" claim consistent with the directives before the irreversible cleanup.
+# It runs AFTER the checks above on purpose. Those checks are the hard guarantee
+# and the single owner of the landed-work test (hard rule #3), so they must be
+# the ones to speak: they distinguish uncommitted changes from unlanded commits
+# and recognize squash-merged PRs, which is strictly more than the gate can
+# restate. The gate then re-proves the remaining invariants (worktree, scout
+# report, approval) and blocks anything they would have let through. It FAILS
+# OPEN when the solver tooling is absent. Skipped under --force (the explicit
+# discard path) and for secondmates (governed elsewhere).
+if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  set +e
+  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
+  gate_rc=$?
+  set -e
+  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
+    printf '%s\n' "$gate_out" >&2
+    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
+    exit 1
   fi
 fi
 
