@@ -1068,12 +1068,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-# Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
-# with the directives before the irreversible teardown. It FAILS OPEN when the
-# solver tooling is absent, so the battle-tested bash checks below remain the hard
-# guarantee; when present it gives a provable, named refusal first. Skipped under
-# --force (the explicit discard path) and for secondmates (governed elsewhere).
-if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+# Formal completeness gate (AGENTS.md section 7), scout half: prove the "done"
+# claim consistent with the directives before the irreversible teardown. It FAILS
+# OPEN when the solver tooling is absent, so the battle-tested bash checks remain
+# the hard guarantee; when present it gives a provable, named refusal first.
+# Skipped under --force (the explicit discard path).
+if [ "$FORCE" != "--force" ] && [ "$KIND" = scout ]; then
   set +e
   gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
   gate_rc=$?
@@ -1096,6 +1096,25 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+# Formal completeness gate, ship half: run only after the bash safety check above
+# already cleared this worktree. That check is the authoritative, more
+# sophisticated landed-work proof (PR-merge and content-in-default detection the
+# gate cannot cheaply re-derive from git alone), so hand it the gate directly as
+# --landed/--worktree rather than letting the gate re-derive "landed" from
+# git-only signals that would diverge from it and false-block legitimately landed
+# work (e.g. a squash-merged PR whose branch was deleted).
+if [ "$FORCE" != "--force" ] && [ "$KIND" = ship ]; then
+  set +e
+  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" --landed pushed --worktree clean 2>&1)
+  gate_rc=$?
+  set -e
+  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ]; then
+    printf '%s\n' "$gate_out" >&2
+    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
+    exit 1
   fi
 fi
 
