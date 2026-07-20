@@ -172,6 +172,40 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
 ### Two-tier skill layout
+```sh
+FM_HOME=                 # optional operational home; unset means this repo root
+FM_POLL=15              # seconds between watcher cycles
+FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
+FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
+FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
+FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
+FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
+FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
+FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
+FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
+FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+# formal completeness gate (bin/fm-completeness-check.sh); optional, fails open without z3
+FM_COMPLETENESS_GATE=1     # set to 0 to skip the gate entirely (always exits 0)
+FM_COMPLETENESS_STRICT=0   # set to 1 to refuse instead of fail open when the solver tooling is absent/broken
+FM_COMPLETENESS_RULES=     # optional override for the rules file (default bin/fm-completeness.rules.json)
+FM_CAPTAIN_APPROVED=       # assert the captain's merge approval at the merge gate: granted|yes|1|true, or not_required under yolo
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
+FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
+FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
+FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
+# sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
+FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
+FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
+FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
+FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
+FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
+FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
+FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
+```
 
 Firstmate's skills live in two separate places with different audiences:
 
@@ -205,3 +239,25 @@ Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workf
 ## License
 
 MIT - see [LICENSE](LICENSE).
+```sh
+bash -n bin/*.sh                          # syntax-check the toolbelt
+shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
+for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
+# tests/lib.sh, tests/secondmate-helpers.sh, tests/wake-helpers.sh are sourced shared helpers, not run directly.
+tests/fm-wake-queue.test.sh               # wake-queue losslessness: concurrent append/drain, signal catch-up, enqueue-before-suppressor ordering, atomic double-drain, dedupe
+tests/fm-watcher-lock.test.sh             # watcher singleton + lock-primitive races + watch-arm liveness + guard warnings
+tests/fm-daemon.test.sh                   # sub-supervisor classifiers, captain-status-phrase matrix, /afk presence-gating, border-aware composer, max-defer, and fm-send submit units
+tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher+daemon lifecycle: routine/terminal routing across a restart, one buffered digest, no duplicate, stale transient/persistent/resume
+tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end afk injection: partial-input deferral, swallowed-Enter retry, normal single-digest
+tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
+tests/fm-secondmate-lifecycle-e2e.test.sh # secondmate happy path: seed -> spawn -> routed send -> backlog handoff -> recovery respawn -> teardown
+tests/fm-secondmate-safety.test.sh        # secondmate path-boundary safety matrices, registry/charter/origin validation, lease handling, no-mistakes init, handoff safety
+tests/fm-spawn-batch.test.sh              # fm-spawn.sh batch (id=repo) argument parsing and FM_HOME project-path scoping
+tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
+tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
+tests/fm-completeness.test.sh             # completeness gate: off-switch, fail-open, strict enforcement, argument parsing, and (when z3 imports) the SAT/UNSAT invariant matrix plus --id derivation
+[ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
+[ "$(readlink .claude/skills)" = "../.agents/skills" ]
+FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then "heartbeat")
+```
