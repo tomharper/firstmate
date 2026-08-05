@@ -57,7 +57,8 @@ If the user types directly into the visible thread, treat that as authoritative 
 A Desktop-owned Codex thread can append to Firstmate status files only when the prompt gives an absolute path and the Desktop permission context can write that checkout.
 That makes status writes a verified return-channel requirement, not a fact to assume.
 
-For a Firstmate-managed task, include an explicit status instruction:
+For a Firstmate-managed task, include an explicit status instruction.
+The stamp inside it is the one `bin/fm-classify-lib.sh` owns, spelled out literally because a Desktop thread cannot source that library; keep the two in step if the format ever changes:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.

@@ -192,7 +192,7 @@ if [ -n "$ID" ]; then
 fi
 
 # Approval at a merge gate is an explicit assertion the caller must make
-# (directive #2): $FM_CAPTAIN_APPROVED in {granted,yes,1} -> granted;
+# (directive #2): $FM_CAPTAIN_APPROVED in {granted,yes,1,true} -> granted;
 # {not_required} -> not_required; anything else / unset -> pending (blocks).
 if [ "$GATE" = "merge" ] && [ -z "$APPROVAL" ]; then
   case "${FM_CAPTAIN_APPROVED:-}" in
