@@ -726,10 +726,14 @@ FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
 config_first=$!
 inherit_wait=0
+# data/captain-shared.md is the last item fm_config_inherit_items yields, so the
+# push crosses the SSH boundary once per config item before it reaches this
+# deliberately blocked write. Allow the same 30-second loaded-runner bound as
+# the earlier blocked worker path.
 while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   kill -0 "$config_first" 2>/dev/null || fail "first inheritance transaction exited before its blocked write"
   inherit_wait=$((inherit_wait + 1))
-  [ "$inherit_wait" -le 250 ] || fail "first inheritance transaction never reached its blocked write"
+  [ "$inherit_wait" -le 1500 ] || fail "first inheritance transaction never reached its blocked write"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
