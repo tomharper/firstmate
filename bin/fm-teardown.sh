@@ -1002,9 +1002,13 @@ teardown_treehouse_return() {
 # uncommitted changes are committed or stashed, and a local-only branch that no
 # remote or default branch carries is merged or pushed. bin/fm-merge-local.sh
 # refuses anything that is not mode=local-only, so offering it for the wrong
-# cause would leave --force as the only actionable clause on screen.
+# cause would leave --force as the only actionable clause on screen. It also
+# refuses a bare invocation, because that merge is firstmate exercising the
+# captain's merge authority and the captain's word must be asserted through
+# $FM_CAPTAIN_APPROVED, so this text names the asserted form it accepts rather
+# than a command that would meet the operator with a second refusal.
 unlanded_work_remediation() {  # [default-branch]
-  echo "Merge the branch into local ${1:-<default>} first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+  echo "Merge the branch into local ${1:-<default>} first (FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID, or not_required under yolo), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
 }
 
 uncommitted_work_remediation() {

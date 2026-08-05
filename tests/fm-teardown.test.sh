@@ -628,6 +628,12 @@ test_local_only_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "truly-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "truly-unpushed: no REFUSED line in stderr"
+  # Whichever of the two callers refuses first, the remediation must name the
+  # invocation bin/fm-merge-local.sh actually accepts. A bare fm-merge-local.sh
+  # is refused there for an unasserted approval, which would meet the operator
+  # with a second refusal and leave --force as the only clause that works.
+  grep -q 'FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh task-x1' "$case_dir/stderr" \
+    || fail "truly-unpushed: the remediation did not name the asserted-approval merge invocation"
   pass "local-only worktree with truly unpushed work is refused (safety preserved)"
 }
 
@@ -731,8 +737,10 @@ SH
   expect_code 1 "$rc" "gate-blocked: teardown should refuse on a blocked verdict"
   grep -q 'violated: NO_UNLANDED_AT_TEARDOWN' "$case_dir/stderr" \
     || fail "gate-blocked: the named invariant was lost"
-  grep -q 'bin/fm-merge-local.sh after the captain approves' "$case_dir/stderr" \
-    || fail "gate-blocked: the refusal did not name the merge remediation"
+  grep -q 'FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh task-x1' "$case_dir/stderr" \
+    || fail "gate-blocked: the refusal did not name the merge remediation bin/fm-merge-local.sh accepts"
+  grep -q 'not_required under yolo' "$case_dir/stderr" \
+    || fail "gate-blocked: the refusal did not name the yolo form of the approval assertion"
   grep -q "push to a fork/remote, or get the captain's explicit OK to discard, then --force" "$case_dir/stderr" \
     || fail "gate-blocked: the refusal did not name the remaining remediations"
   pass "a blocked completeness gate names the remediation the bash check would have printed"
