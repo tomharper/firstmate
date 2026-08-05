@@ -8,10 +8,11 @@ observed facts, and the solver PROVES it either SAT (consistent with every
 invariant) or UNSAT (provably premature, with the violated rule named). Hard
 rules gate; soft rules score (never block).
 
-The only dependency is `z3-solver` (public PyPI) — there is no other library to
-install. The rules are DATA, not code: they load from fm-completeness.rules.json
-(or $FM_COMPLETENESS_RULES). This module is a small self-contained shim that
-compiles that data into a Z3 model and runs the check.
+The only dependency is the optional solver declared in requirements.txt at the
+repository root — there is no other library to install, and its absence leaves
+the caller failing open. The rules are DATA, not code: they load from
+fm-completeness.rules.json (or $FM_COMPLETENESS_RULES). This module is a small
+self-contained shim that compiles that data into a Z3 model and runs the check.
 
 Encoding: each axis is a Z3 EnumSort variable. A hard rule compiles to
 `Implies(when, require AND not-forbid)`. A concrete claim is verified by asking,

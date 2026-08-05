@@ -20,20 +20,15 @@
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "BOOTSTRAP_INFO: completeness gate available".
-#          z3 (z3-solver) is an OPTIONAL capability powering the formal
-#          completeness gate (bin/fm-completeness-check.sh), reported only under
+#          z3 is an OPTIONAL capability powering the formal completeness gate
+#          (bin/fm-completeness-check.sh), reported only under
 #          FM_BOOTSTRAP_VERBOSE_FACTS=1 and only when python3 can import z3. It is
 #          never a MISSING line and never prompts an install: without it the gate
-#          steps aside. The requirement is only that z3 is importable by the
-#          python3 already on PATH, however the operator chooses to provide it,
-#          because the gate imports it with that ambient interpreter; a
-#          virtualenv therefore satisfies it only while that python3 IS the
-#          virtualenv's. "fm-bootstrap.sh install z3" runs one example that
-#          satisfies it, "python3 -m pip install --break-system-packages
-#          z3-solver". The flag is needed because Homebrew and Debian mark their
-#          python externally-managed under PEP 668 and a bare pip install fails
-#          there; it overrides that protection, which is a fine choice on a
-#          personal machine but is not the only way to meet the requirement.
+#          steps aside. The dependency itself is declared in requirements.txt at
+#          the repository root, which owns the package and its floor; the
+#          requirement here is only that it ends up importable by the python3
+#          already on PATH, because the gate imports it with that ambient
+#          interpreter. "fm-bootstrap.sh install z3" installs from that file.
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -674,7 +669,7 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
-    z3) echo "python3 -m pip install --break-system-packages z3-solver  # one example that makes z3 importable by the python3 on PATH; the flag overrides PEP 668 externally-managed protection" ;;
+    z3) echo "python3 -m pip install -r \"$FM_ROOT/requirements.txt\"  # requirements.txt declares the optional dependency; this makes it importable by the python3 on PATH" ;;
     *) return 1 ;;
   esac
 }
@@ -1084,8 +1079,8 @@ fi
 # z3 is an OPTIONAL capability, never a MISSING line and never an install prompt:
 # without it bin/fm-completeness-check.sh steps aside and the bash lifecycle
 # checks remain the hard guarantee. Opting in means only making z3 importable by
-# the python3 on PATH, which is exactly what this probe asks; see the header for
-# one example command that does it.
+# the python3 on PATH, which is exactly what this probe asks; requirements.txt
+# declares the dependency that satisfies it.
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && command -v python3 >/dev/null 2>&1 && python3 -c 'import z3' >/dev/null 2>&1; then
   echo "BOOTSTRAP_INFO: completeness gate available"

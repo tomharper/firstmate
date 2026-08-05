@@ -42,6 +42,16 @@ rc_of() {
   || fail "the shipped engine bin/fm-completeness.py is missing or not executable"
 pass "the gate ships its default rules file and engine"
 
+# requirements.txt is the machine-readable owner of the solver dependency, and
+# every prose surface points at it instead of naming a package or install flag.
+# If the declaration silently disappeared, those pointers would dangle while the
+# suite below still passed by skipping the solver tier.
+[ -f "$ROOT/requirements.txt" ] \
+  || fail "requirements.txt is missing: the optional solver dependency is undeclared"
+grep -Eq '^[[:space:]]*z3-solver([[:space:]]*[<>=!~]|[[:space:]]*$)' "$ROOT/requirements.txt" \
+  || fail "requirements.txt does not declare z3-solver"
+pass "requirements.txt declares the optional z3-solver dependency"
+
 # --- Tooling-agnostic tier ---------------------------------------------------
 
 # Off-switch always yields 0 regardless of facts.

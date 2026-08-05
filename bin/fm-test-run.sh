@@ -890,8 +890,10 @@ families_for_changed_path() {
       printf '%s\n' snapshot-bearings
       printf '%s\n' "__script__:fm-pending-reply.test.sh"
       ;;
-    bin/fm-completeness*)
-      # The gate and its rules data guard fm-teardown.sh and fm-merge-local.sh.
+    bin/fm-completeness*|requirements.txt)
+      # The gate and its rules data guard fm-teardown.sh and fm-merge-local.sh,
+      # and requirements.txt is the declaration of the gate's optional solver
+      # dependency that the completeness suite asserts still exists.
       printf '%s\n' pr-forge
       ;;
     bin/fm-ground.sh|bin/fm-verify-delivered.sh)
