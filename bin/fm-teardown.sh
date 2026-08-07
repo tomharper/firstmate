@@ -29,6 +29,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# When the optional Z3 completeness gate (bin/fm-completeness-check.sh) is
+# installed, it additionally proves the teardown claim consistent with the
+# directives before anything irreversible runs (skipped under --force and for
+# secondmates); without the solver it steps aside and the checks above remain the
+# hard guarantee.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -990,6 +995,26 @@ teardown_treehouse_return() {
   return 1
 }
 
+# The one owner of each unlanded-work remediation text. The completeness gate
+# refuses before validate_worktree_teardown_safety ever runs, so both refusals
+# read from here rather than keeping a second copy that can drift. They are two
+# messages because holds_unlanded_work has two causes that clear differently:
+# uncommitted changes are committed or stashed, and a local-only branch that no
+# remote or default branch carries is merged or pushed. bin/fm-merge-local.sh
+# refuses anything that is not mode=local-only, so offering it for the wrong
+# cause would leave --force as the only actionable clause on screen. It also
+# refuses a bare invocation, because that merge is firstmate exercising the
+# captain's merge authority and the captain's word must be asserted through
+# $FM_CAPTAIN_APPROVED, so this text names the asserted form it accepts rather
+# than a command that would meet the operator with a second refusal.
+unlanded_work_remediation() {  # [default-branch]
+  echo "Merge the branch into local ${1:-<default>} first (FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID, or not_required under yolo), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+}
+
+uncommitted_work_remediation() {
+  echo "Commit them, or stash them (or get the captain's explicit OK to discard, then --force)." >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1006,6 +1031,8 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  # Same untracked-residue filter as git_unlanded_facts in
+  # bin/fm-completeness-check.sh, which gates this teardown first: edit both.
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
@@ -1033,13 +1060,13 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      unlanded_work_remediation "$DEFAULT"
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    uncommitted_work_remediation
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -2095,6 +2122,49 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   fi
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+# Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
+# with the directives before the irreversible teardown. It STEPS ASIDE when the
+# solver tooling is absent, so the bash checks below remain the hard guarantee;
+# when present it gives a provable, named refusal first. Exit 0 is the gate's ONLY
+# proceed signal (it exits 0 for SAT, for the off-switch, and when it fails open),
+# so every other rc blocks: 2 is UNSAT, 64 is invalid facts, 3 is strict-mode
+# enforcement, and anything else means the gate could not run at all - a missing
+# or non-executable wrapper must never read as approval. Skipped under --force
+# (the explicit discard path) and for secondmates (governed elsewhere).
+if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  set +e
+  gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
+  gate_rc=$?
+  set -e
+  if [ "$gate_rc" != 0 ]; then
+    printf '%s\n' "$gate_out" >&2
+    case "$gate_rc" in
+      2)
+        # A named invariant is not an instruction. When the gate refuses over
+        # unlanded work it pre-empts validate_worktree_teardown_safety, so print
+        # that check's own remediation here too, or --force reads as the only
+        # way out of the most common refusal. Which remediation is decided by the
+        # gate's own evidence line rather than derived a second time here: an
+        # uncommitted-changes block clears by committing, and offering the
+        # local-only merge for it would name a command that refuses the task.
+        case "$gate_out" in
+          *"uncommitted changes present"*)
+            uncommitted_work_remediation
+            ;;
+          *NO_UNLANDED_AT_TEARDOWN*|*SHIP_REQUIRES_LANDED*)
+            unlanded_work_remediation "$(default_branch || true)"
+            ;;
+        esac
+        ;;
+      3|64) ;;
+      *) echo "completeness gate could not run (exit $gate_rc); treating that as blocking." >&2 ;;
+    esac
+    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
+    exit 1
+  fi
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then

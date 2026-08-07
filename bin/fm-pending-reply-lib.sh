@@ -68,6 +68,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -791,6 +793,7 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now task_id summary payload parent_status outcome
+  local escalation
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -828,9 +831,12 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   esac
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
-  fi
+  # Whole-line dedup under the stamp contract, through the writer that owns it
+  # (bin/fm-classify-lib.sh): each existing line's stripped body is compared for
+  # equality rather than searching for the payload as a substring, which would
+  # let an unrelated line that merely quotes it suppress a real escalation.
+  escalation="blocked: $payload"
+  fm_status_append_once "$parent_status" "$escalation" 2>/dev/null || return 1
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1

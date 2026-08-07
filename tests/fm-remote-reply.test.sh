@@ -156,6 +156,24 @@ assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remaine
   || fail "earlier generation replay duplicated its parent status"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
+# The remote secondmate stamps its own appends (bin/fm-secondmate-report.sh and
+# the brief-scaffolded instruction both lead with the UTC stamp owned by
+# bin/fm-classify-lib.sh), so the ingest validator must read the verb from the
+# stripped body. Legacy unstamped lines from an older remote home stay valid.
+STAMP='2026-08-04T11:22:33Z'
+printf '%s done [corr=3333333333333333]: stamped fourth generation\n' "$STAMP" \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "stamped reply generation was not captured"
+RESULT_STAMPED="$PARENT/state/procevent-inbox/$SID.4.result"
+remote_env "$ADAPTER" handle ios 4 "$RESULT_STAMPED" >/dev/null \
+  || fail "a stamped remote reply was rejected by the ingest validator"
+assert_grep "$STAMP done [corr=3333333333333333]" "$PARENT/state/ios.status" \
+  "stamped remote reply lost its stamp or its correlation id on append"
+assert_grep 'working [corr=1111111111111111]: second generation' "$PARENT/state/ios.status" \
+  "a legacy unstamped remote reply stopped validating under the stamp contract"
+pass "stamped and legacy unstamped remote replies both validate and keep their correlation id"
+
 # A digest-valid but uncorrelated line is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
 # specifically about status validation, not incidental digest failure.
@@ -184,23 +202,36 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_FOUR=$(find "$PARENT/state/procevent-inbox" -name "$SID.4.result" -print -quit)
-[ -n "$RESULT_FOUR" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_FOUR")" = continuity-broken ] \
+RESULT_FIVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.5.result" -print -quit)
+[ -n "$RESULT_FIVE" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_FIVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-four.out" 2>&1
+remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" > "$TMP_ROOT/handle-five.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_FOUR" >/dev/null 2>&1 || true
+# The escalation this stamp contract exists to date is exactly the one that must
+# not read as an unknown age, so it is appended through the stamped writer.
+ESC_LINE=$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | head -n 1)
+case "$ESC_LINE" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\ *) ;;
+  *) fail "continuity escalation was appended without a stamp: $ESC_LINE" ;;
+esac
+remote_env "$ADAPTER" ingest ios "$RESULT_FIVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
-pass "truncation is detected, escalated once, and not silently rebased"
+# A stamped replay must also dedup against an unstamped legacy copy of the same
+# escalation, which whole-line dedup would miss.
+printf '%s\n' "${ESC_LINE#* }" >> "$PARENT/state/ios.status"
+remote_env "$ADAPTER" ingest ios "$RESULT_FIVE" >/dev/null 2>&1 || true
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "continuity escalation did not dedup its stamped append against an unstamped legacy copy"
+pass "truncation is detected, escalated once with a stamp, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.4.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.5.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -208,7 +239,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"

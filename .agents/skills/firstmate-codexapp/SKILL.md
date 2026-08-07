@@ -57,13 +57,15 @@ If the user types directly into the visible thread, treat that as authoritative 
 A Desktop-owned Codex thread can append to Firstmate status files only when the prompt gives an absolute path and the Desktop permission context can write that checkout.
 That makes status writes a verified return-channel requirement, not a fact to assume.
 
-For a Firstmate-managed task, include an explicit status instruction:
+For a Firstmate-managed task, include an explicit status instruction.
+The stamp inside it is the one `bin/fm-classify-lib.sh` owns, spelled out literally because a Desktop thread cannot source that library; keep the two in step if the format ever changes:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
+Start every line with the current UTC time from `date -u +%Y-%m-%dT%H:%M:%SZ`, then the state prefix, so a supervisor can tell a fresh report from an old one.
 Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
 Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
-Before doing substantive work, append "working: Codex Desktop thread started".
+Before doing substantive work, append "<timestamp> working: Codex Desktop thread started".
 ```
 
 Verify the return channel before treating the thread as supervised:

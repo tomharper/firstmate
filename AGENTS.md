@@ -36,7 +36,7 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
-   Before reporting a capability as delivered or marking a task done, check the claim against the merged code with `bin/fm-verify-delivered.sh`, whose header owns its modes and exact outcomes; only exit 0 may be read as delivered.
+   Check a delivery claim against the merged code rather than against recollection, and where its modes apply `bin/fm-verify-delivered.sh` is the available evidence for that, with its header owning those modes and their exact outcomes.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
@@ -87,9 +87,10 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   <id>/log.md        crewmate working log, maintained by the crewmate as it works; its resume-from-disk memory, survives teardown, and never wakes firstmate
+  repos/<key>.md     per-repo ground truth (architecture, studied tool choices, hard constraints) injected into every scaffolded ship and scout brief, never into a secondmate charter; `bin/fm-ground.sh` owns resolution and the external-repo `repo-path:` form
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.status        appended by crewmates: "<utc-stamp> <state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
@@ -306,6 +307,7 @@ Before deciding any ask-user finding, load `ask-user-authority`; the implementat
 Never merge a red PR.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+A local-only landing asserts the captain's word explicitly as `FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh <id>`, or `not_required` under `yolo`; the completeness gate blocks an unasserted local merge when its solver is installed and steps aside when it is not.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

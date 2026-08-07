@@ -30,6 +30,8 @@ Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed 
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 Because of that, a per-wake read of only the latest line can bury an earlier still-open `needs-decision`/`blocked` under later unrelated appends; `fm-wake-drain.sh` prints a separate, fleet-wide OPEN DECISIONS section on every drain (including the empty-queue path session-start relies on), built from `fm-classify-lib.sh`'s `status_open_decisions` fold so the buried decision keeps surfacing until it is explicitly resolved.
+Every append carries a leading ISO-8601 UTC stamp whose format `bin/fm-classify-lib.sh` owns, so an event dates itself instead of relying on file mtime, which only ever dated the last line.
+`bin/fm-crew-state.sh` reports that as the age of the evidence behind its verdict - `live` for a run-step or pane read, the line's own elapsed time for a status-log read - and an untimestamped legacy line reports an unknown age rather than a guessed one.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
@@ -164,6 +166,10 @@ Both shapes keep two durable channels with deliberately different wake semantics
 `state/<id>.status` is the supervisor channel: sparse, and every append wakes firstmate.
 `data/<id>/log.md` is the crewmate's own working log, maintained by the agent as it works and never a wake source, so it can carry the established facts, rejected approaches, and post-dispatch steers that a lost context would otherwise take with it.
 It survives teardown with the task's other data, which is what lets a relaunched worker resume from disk rather than from a brief firstmate rebuilds by hand.
+
+A scaffolded ship or scout brief also leads with the target repo's ground truth when the repo has any: the established architecture, studied tool choices, and hard constraints firstmate keeps in `data/repos/<key>.md`, injected ahead of the task as a binding do-not-re-derive section so a worker never re-improvises what the fleet already settled.
+`bin/fm-ground.sh` owns resolution from a repo name or path, and its header owns the `repo-path:` form that makes a repo outside `projects/` first-class without cloning it there.
+Grounding is additive and never blocks a dispatch: a repo with no ground-truth file scaffolds normally and warns on stderr, so the gap is visible rather than silently guessed.
 
 ## Dispatch profiles
 
@@ -308,6 +314,16 @@ For a remote route, the configured code root updates from its own origin on that
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+
+## Lifecycle claims are provable
+
+An optional formal completeness gate (`bin/fm-completeness-check.sh`, Z3-backed via `fm-completeness.py` and `fm-completeness.rules.json`) wires into `fm-teardown.sh` and `fm-merge-local.sh` to prove each done, teardown, or merge claim consistent with the directives before the irreversible step.
+Hard rules gate and soft rules score; a blocked claim names the invariant it violated instead of refusing anonymously.
+Bootstrap reports it as an optional capability only under `FM_BOOTSTRAP_VERBOSE_FACTS=1` and only when `python3` can import `z3`, and when the solver is absent the gate steps aside so the existing bash safety checks remain the hard guarantee.
+`FM_COMPLETENESS_GATE=0` disables it entirely, and `FM_COMPLETENESS_STRICT=1` refuses instead of stepping aside when the tooling is absent or broken.
+Exit 0 is the gate's only proceed signal, covering SAT, the off-switch, and stepping aside, so both callers block on every other exit including the ones a missing or non-executable wrapper produces rather than reading a check that never ran as approval.
+The gate never re-derives whether remote-backed ship work has landed: `fm-teardown.sh` owns that test, and duplicating it is what once made the gate false-block squash-merged work.
+A local-only merge asserts the captain's approval explicitly through `FM_CAPTAIN_APPROVED` (`granted`, or `not_required` under yolo); without it the gate blocks the merge when the solver is installed.
 
 ## Restart-proof
 

@@ -385,7 +385,7 @@ test_ship_and_scout_briefs_scaffold_working_log() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind: brief was not scaffolded"
@@ -429,11 +429,44 @@ test_ship_setup_step_is_resume_aware() {
   local home brief
   home="$TMP_ROOT/worklog-resume-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-worklog-resume someproj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-worklog-resume someproj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/brief-worklog-resume/brief.md"
   assert_grep "if you are resuming and it already exists, check it out instead and read your working log below" "$brief" \
     "ship brief's first setup step is not resume-aware"
   pass "fm-brief.sh: ship setup step routes a resuming worker to its working log"
+}
+
+# Ground truth is what stops a worker re-improvising a repo's architecture, so it
+# has to reach the brief verbatim and as a binding section. A repo with no ground
+# truth must still scaffold - grounding is additive, never a dispatch blocker -
+# but the gap has to be audible rather than silent.
+test_ground_truth_is_injected_into_ship_and_scout_briefs() {
+  local home err
+  home="$TMP_ROOT/ground-home"
+  mkdir -p "$home/data/repos"
+  printf 'repo-path: /opt/acme\n\n- Storage is Postgres, never SQLite.\n' > "$home/data/repos/acme.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-ship acme --mode no-mistakes >/dev/null 2>&1
+  assert_grep "Repo ground truth - authoritative, do not re-derive or guess" \
+    "$home/data/brief-ground-ship/brief.md" "ship brief lost the ground-truth heading"
+  assert_grep "Storage is Postgres, never SQLite." \
+    "$home/data/brief-ground-ship/brief.md" "ship brief lost the ground-truth body"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-scout acme --scout >/dev/null 2>&1
+  assert_grep "Storage is Postgres, never SQLite." \
+    "$home/data/brief-ground-scout/brief.md" "scout brief lost the ground-truth body"
+
+  # An ungrounded dispatch still produces a brief, and says so on stderr.
+  err="$TMP_ROOT/ground-warn.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-none otherproj --mode no-mistakes >/dev/null 2>"$err"
+  [ -f "$home/data/brief-ground-none/brief.md" ] \
+    || fail "a repo with no ground truth must still scaffold a brief"
+  assert_grep "no ground truth for 'otherproj'" "$err" \
+    "an ungrounded dispatch must warn on stderr"
+  if grep -q "Repo ground truth" "$home/data/brief-ground-none/brief.md"; then
+    fail "an ungrounded brief must not carry an empty ground-truth section"
+  fi
+  pass "fm-brief.sh: ground truth reaches ship and scout briefs, and its absence warns"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -753,6 +786,58 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every scaffold's status instruction must timestamp the append, and must stay
+# ONE copy-pasteable line: an unstamped append is indistinguishable from the same
+# event hours earlier, which is how a stale `done:` was once relayed as current
+# work. The command is executed here for real and the resulting line is fed back
+# through the shared classifier, so the contract is proven end to end rather than
+# by matching prose.
+test_status_instruction_is_one_stamped_line() {
+  local home kind id brief instruction status_file line
+  home="$TMP_ROOT/stamped-status-home"
+  mkdir -p "$home/data" "$home/state"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  for kind in ship scout secondmate; do
+    id="brief-stamp-$kind"
+    case "$kind" in
+      ship)   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 ;;
+      scout)  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+        "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # shellcheck disable=SC2016 # The scaffolded command must reach the worker unexpanded.
+    assert_grep 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) {state}: {one short line}" >>' "$brief" \
+      "$kind brief did not scaffold a timestamped status append"
+
+    # Exactly one line carries the whole instruction: no helper script to find,
+    # no second line to remember.
+    instruction=$(grep -c 'date -u +%Y-%m-%dT%H:%M:%SZ' "$brief")
+    [ "$instruction" = 1 ] \
+      || fail "$kind brief must carry exactly one status-append command, found $instruction"
+
+    # Run the scaffolded command as a worker would, then classify what it wrote.
+    status_file="$home/state/$id.status"
+    instruction=$(grep -o 'echo "[^"]*" >> .*' "$brief" | head -1)
+    instruction=${instruction%\`*}
+    eval "${instruction/\{state\}: \{one short line\}/done: PR https://x/y/pull/1 checks green}" \
+      || fail "$kind brief's scaffolded status command failed to run"
+    line=$(last_status_line "$status_file")
+    [ -n "$(status_line_stamp "$line")" ] \
+      || fail "$kind brief's status command wrote no timestamp: $line"
+    [ "$(status_line_verb "$line")" = "done" ] \
+      || fail "$kind brief's stamped status line did not classify as done: $line"
+    status_is_captain_relevant "$line" \
+      || fail "$kind brief's stamped status line lost captain relevance: $line"
+    [ "$(status_line_age_secs "$line")" -lt 120 ] \
+      || fail "$kind brief's fresh status line did not read as fresh: $line"
+  done
+  pass "fm-brief.sh: every scaffold's status append is one copy-pasteable timestamped line"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -785,6 +870,7 @@ test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_ship_and_scout_briefs_scaffold_working_log
 test_ship_setup_step_is_resume_aware
+test_ground_truth_is_injected_into_ship_and_scout_briefs
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
@@ -794,4 +880,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_status_instruction_is_one_stamped_line
 test_scout_and_secondmate_scaffold
