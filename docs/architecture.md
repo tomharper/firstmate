@@ -33,7 +33,8 @@ Because of that, a per-wake read of only the latest line can bury an earlier sti
 Every append carries a leading ISO-8601 UTC stamp whose format `bin/fm-classify-lib.sh` owns, so an event dates itself instead of relying on file mtime, which only ever dated the last line.
 `bin/fm-crew-state.sh` reports that as the age of the evidence behind its verdict - `live` for a run-step or pane read, the line's own elapsed time for a status-log read - and an untimestamped legacy line reports an unknown age rather than a guessed one.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
-The script header owns the exact run-head ancestry rules.
+Only the structured `axi status` read produces a terminal verdict; the coarse runs-list fallback carries no gate, findings, PR, or head beyond one short sha, so it reports only that this branch has a run in flight right now, and a run it cannot attribute leaves the reading to the pane and status-log sources rather than manufacturing an unverified `done` or `failed`.
+The script header owns the exact run-head ancestry and runs-list attribution rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.

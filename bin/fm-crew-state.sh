@@ -35,6 +35,12 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution.
+#      The coarse fallback is weaker still, and is bounded twice: only the
+#      branch's NEWEST runs-list row is a candidate (rows beneath it are earlier
+#      runs of the same branch), and only an ACTIVE row is attributed at all. A
+#      terminal coarse row is an unverified terminal claim - it cannot be told
+#      apart from a superseded earlier run - so it never becomes a terminal
+#      state; the reading falls through to the pane/status-log sources instead.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -355,9 +361,23 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the branch's NEWEST row's
+# status word (running/completed/cancelled/failed), or empty when that row's
+# code identity does not bind and when the branch has no run within
+# FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# ONLY the branch's newest row is a candidate. Rows beneath it are, within one
+# repo and one branch name, earlier runs of that same branch - superseded by
+# definition. This loop used to `continue` past a newest row whose sha did not
+# bind and keep scanning, which let an OLDER run be attributed as the crew's
+# current one. That is the 2026-08-08 incident on fm/ci-runs-three-test-files:
+# an aborted run was terminal `cancelled` at head 4f8f320b, the next run was
+# submitted from 4f8f320b and was still active and parked at a review gate, and
+# because the pipeline had moved the active run's own head (its rebase step and
+# fix-round commits), only the older cancelled row still bound - so the crew
+# read `failed - run cancelled` while its run was very much alive. An
+# unbindable newest row means there is no run this reader can attribute; it
+# does not mean an earlier one is current.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -373,12 +393,10 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
+      # Same code-identity rule as axi status. A newest row that does not bind
+      # (rewritten or advanced tip, or a pipeline-moved run head) ends the
+      # scan with no attribution rather than falling back to an older run.
+      nm_coarse_head_matches_worktree "$sha" && printf '%s' "$st"
       return 0
     fi
   done <<< "$out"
@@ -411,7 +429,6 @@ HAVE_RUN=0
 # a bare status word came back from the runs-list fallback above, so the
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
-COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -428,8 +445,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      coarse_status=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      # Only an ACTIVE coarse row is attributable. The runs list carries no
+      # gate, no findings, no PR and no head beyond the row's own short sha, so
+      # a terminal row read here is an UNVERIFIED TERMINAL CLAIM: nothing in it
+      # distinguishes "this crew's run finished" from "an earlier run of this
+      # branch finished before the current one started", and a false terminal
+      # verdict is the expensive direction - `failed` invites a restart that
+      # discards in-flight pipeline work, `done` invites a premature teardown.
+      # A terminal row is therefore dropped and the reading falls through to
+      # the pane and status-log sources below, which report their own honest
+      # source and evidence age. (Statuses verified against the real run store:
+      # running, completed, failed, cancelled - only `running` is active.)
+      if [ "$coarse_status" = running ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
@@ -446,20 +474,17 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
+    # No step/gate detail is available from the plain runs list, and only an
+    # ACTIVE row is attributed at all (see the attribution block above), so the
+    # coarse source reports exactly one thing: this branch has a run in flight
+    # right now. A crew genuinely parked at a gate still gets full detail once
+    # `axi status` reports its own branch again (e.g. once its own step is the
+    # most-recently-touched one), and its own needs-decision/blocked status-log
+    # append (a captain-relevant VERB) is surfaced through
+    # signal_reason_is_actionable regardless of this coarse-vs-full
+    # distinction, so a real gate is never silently missed.
+    RUN_STATE=working
+    RUN_DETAIL="validating (background run)"
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
