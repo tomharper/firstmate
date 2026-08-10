@@ -248,9 +248,31 @@ fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_J
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
+# The published pid is the served worker, whose Linux supervisor parent
+# restarts it after a crash - proven on its own further below. This case is
+# about ownership state abandoned with no worker behind it, so the supervisor
+# has to go first: leaving it alive races its legitimate restart against the
+# fabricated state, and a restarted worker keeps the heartbeat fresh under a
+# pid file this case has already overwritten.
 CRASHED_WORKER_PID=$NEW_WORKER_PID
+CRASHED_SUPERVISOR_PID=$(ps -o ppid= -p "$CRASHED_WORKER_PID" 2>/dev/null | tr -d '[:space:]')
+case "$CRASHED_SUPERVISOR_PID" in
+  ''|*[!0-9]*) fail "the running worker published no readable supervisor parent" ;;
+esac
+case "$(ps -o command= -p "$CRASHED_SUPERVISOR_PID" 2>/dev/null)" in
+  *fm-remote-job-worker.sh*) ;;
+  *) fail "the running worker's parent is not its own supervisor" ;;
+esac
+kill -KILL "$CRASHED_SUPERVISOR_PID"
+wait "$CRASHED_SUPERVISOR_PID" 2>/dev/null || true
 kill -KILL "$CRASHED_WORKER_PID"
-wait "$CRASHED_WORKER_PID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  kill -0 "$CRASHED_WORKER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$CRASHED_WORKER_PID" 2>/dev/null; then
+  fail "the crashed worker outlived its supervisor"
+fi
 assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
 sleep 20 &
 OTHER_PID=$!
@@ -298,6 +320,7 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job cou
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the expired queued job could not be reaped"
 pass "the worker expires queued jobs before they can mutate"
 
+echo "DEBUG live-worker-procs=$(pgrep -f "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" | wc -l | tr -d " ") at $(date +%s)"
 FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
 SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
 FM_REMOTE_JOB_QUEUE_TIMEOUT=5
