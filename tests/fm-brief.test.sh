@@ -756,6 +756,64 @@ test_status_instruction_is_one_stamped_line() {
   pass "fm-brief.sh: every scaffold's status append is one copy-pasteable timestamped line"
 }
 
+test_ship_and_scout_briefs_scaffold_working_log() {
+  local home id brief kind
+  home="$TMP_ROOT/worklog-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-worklog-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# Working log" "$brief" "$kind brief missing the working-log section"
+    assert_grep "$home/data/$id/log.md" "$brief" \
+      "$kind brief did not bind the task's own log path"
+    assert_grep "write it as you go, not at the end" "$brief" \
+      "$kind brief did not require continuous logging"
+    assert_grep "If you are resuming this task, read that log first" "$brief" \
+      "$kind brief did not name the log as the resume path"
+    assert_grep "what you tried and rejected and why" "$brief" \
+      "$kind brief did not require rejected approaches in the log"
+    assert_grep "append it to the log before you act on it" "$brief" \
+      "$kind brief did not require steers to be recorded before acting"
+    assert_grep "appending to it never notifies firstmate" "$brief" \
+      "$kind brief did not separate the log from the waking status channel"
+    # The log lives under data/<id>/, outside the worktree, so the
+    # stay-inside-the-worktree rule must permit it the way it permits the
+    # status file. Without this a careful worker cannot obey both rules.
+    assert_grep "the only files you may write outside it are" "$brief" \
+      "$kind brief forbids writing the working log it requires"
+    assert_grep "your working log above" "$brief" \
+      "$kind brief did not except the working log from the worktree-only rule"
+    assert_no_grep "WORKLOG" "$brief" \
+      "$kind brief leaked the working-log heredoc delimiter"
+    assert_no_grep "EOF" "$brief" \
+      "$kind brief leaked a heredoc EOF marker (unterminated heredoc)"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" brief-worklog-secondmate --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# Working log" "$home/data/brief-worklog-secondmate/brief.md" \
+    "secondmate charter gained a per-task working log"
+  pass "fm-brief.sh: ship and scout briefs scaffold the agent-maintained working log"
+}
+
+test_ship_setup_step_is_resume_aware() {
+  local home brief
+  home="$TMP_ROOT/worklog-resume-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-worklog-resume someproj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/brief-worklog-resume/brief.md"
+  assert_grep "if you are resuming and it already exists, check it out instead and read your working log below" "$brief" \
+    "ship brief's first setup step is not resume-aware"
+  pass "fm-brief.sh: ship setup step routes a resuming worker to its working log"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -777,3 +835,5 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_status_instruction_is_one_stamped_line
+test_ship_and_scout_briefs_scaffold_working_log
+test_ship_setup_step_is_resume_aware
