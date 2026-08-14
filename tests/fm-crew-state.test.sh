@@ -746,6 +746,138 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
+# --- 2026-08-08 incident: a SUPERSEDED run reported as this crew's state -----
+# Reproduced from the real no-mistakes run table for branch
+# fm/ci-runs-three-test-files: run 01KZERQ4 was aborted -> terminal `cancelled`
+# AT head 4f8f320b, and the next run 01KZF9GX was submitted FROM 4f8f320b and
+# was still ACTIVE (status running, review awaiting_approval) when firstmate
+# read the crew's state. `axi status` named this crew's OWN branch, but the
+# active run's recorded head no longer bound to the worktree tip - the pipeline
+# moves its own head (rebase step, fix-round commits) - so head attribution
+# rejected it and the reading fell through to the coarse runs-list scan. That
+# scan walked PAST the branch's newest row to the older `cancelled` row whose
+# head still bound, and emitted `state: failed - run cancelled` carrying
+# `source: run-step`, the authority label of the structured source. Firstmate
+# ordered a restart on that verdict; only the worker's refusal saved two
+# in-flight fix rounds. Two independent rules are pinned below:
+#   (1) only the branch's NEWEST row may be attributed - rows beneath it are by
+#       definition superseded runs of the same branch;
+#   (2) a coarse TERMINAL row (completed/failed/cancelled) is an unverified
+#       terminal claim and never becomes a terminal state.
+
+# (1)+(2) together, in the exact incident shape.
+test_superseded_terminal_row_not_reported_as_current() {
+  reset_fakes
+  local d cur_short diverged diverged_short out
+  d=$(new_case superseded-terminal-row)
+  make_repo_on_branch "$d/wt" fm/feat-parked
+  git -C "$d/wt" commit -q --allow-empty -m 'crew commit'
+  cur_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The ACTIVE run's recorded head: a real commit in this repo that is neither
+  # the worktree tip nor a descendant of it, exactly as a pipeline rebase
+  # leaves it, so the head-binding rule rejects the run it belongs to.
+  git -C "$d/wt" checkout -q -b fm/pipeline-side HEAD~1
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline rebased head'
+  diverged=$(git -C "$d/wt" rev-parse HEAD)
+  diverged_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/feat-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parked.meta" "window=fm:fm-feat-parked" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_RUN_HEAD=$diverged
+  export FM_FAKE_RUN_HEAD
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-parked)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-parked ${diverged_short}  2026-08-07 23:39
+  cancelled  fm/feat-parked ${cur_short}  2026-08-07 18:45
+EOF
+)"
+  # The crew is genuinely mid-work, which is what the false terminal verdict
+  # contradicted.
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-parked)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-parked busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-parked)
+  assert_not_contains "$out" "state: failed" "a superseded cancelled run must never be reported as the current state"
+  assert_not_contains "$out" "run cancelled" "the superseded run's terminal detail must not be emitted"
+  assert_contains "$out" "state: working" "the crew is working; report that, not a terminal verdict"
+  assert_contains "$out" "source: pane" "with no bindable run, the verdict is pane-sourced, not a coarse terminal row"
+  pass "a superseded terminal run is never reported as the crew's current state"
+}
+
+# (2) alone: a coarse terminal row that DOES bind is still unverified - it
+# cannot be told apart from a superseded earlier run of the same branch, so it
+# must not become a terminal verdict wearing `source: run-step`.
+test_coarse_terminal_row_is_not_a_terminal_verdict() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-coarseterm
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarseterm.meta" "window=fm:fm-feat-coarseterm" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/feat-coarseterm.status"
+  arm_idle_record "$d/state" feat-coarseterm
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-07 23:50
+  cancelled  fm/feat-coarseterm ${short}  2026-08-07 18:45
+EOF
+)"
+  out=$(run_crew_state "$d" feat-coarseterm)
+  assert_not_contains "$out" "state: failed" "a coarse cancelled row must not become a failed verdict"
+  assert_not_contains "$out" "run cancelled" "a coarse cancelled row must not emit a terminal detail"
+  assert_not_contains "$out" "source: run-step" "an unverified coarse terminal row must not claim run-step authority"
+  assert_contains "$out" "source: status-log" "the reading falls through to its honest, age-labelled source"
+
+  # Same rule in the other direction: a coarse `completed` row must not
+  # manufacture a `done` either - that one invites a premature teardown.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-07 23:50
+  completed  fm/feat-coarseterm ${short}  2026-08-07 18:45  https://github.com/o/r/pull/9
+EOF
+)"
+  out=$(run_crew_state "$d" feat-coarseterm)
+  assert_not_contains "$out" "state: done" "a coarse completed row must not become a done verdict"
+  assert_not_contains "$out" "source: run-step" "an unverified coarse completed row must not claim run-step authority"
+  pass "a coarse terminal row is never emitted as a terminal verdict"
+}
+
+# (1) alone, with terminal-ness held out of it: when the branch's NEWEST row
+# does not bind, an OLDER row of the same branch must not be attributed even
+# though it is `running` and its head binds. Rows beneath the newest are
+# superseded runs; attributing one is the mis-attribution at the root of the
+# incident, independent of what status word it carries.
+test_coarse_scan_stops_at_the_branch_newest_row() {
+  reset_fakes
+  local d cur_short diverged_short out
+  d=$(new_case coarse-newest-row-only)
+  make_repo_on_branch "$d/wt" fm/feat-newest
+  git -C "$d/wt" commit -q --allow-empty -m 'crew commit'
+  cur_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q -b fm/newest-side HEAD~1
+  git -C "$d/wt" commit -q --allow-empty -m 'newest run head'
+  diverged_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/feat-newest
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-newest.meta" "window=fm:fm-feat-newest" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/feat-newest.status"
+  arm_idle_record "$d/state" feat-newest
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-newest ${diverged_short}  2026-08-08 00:10
+  running    fm/feat-newest ${cur_short}  2026-08-07 20:00
+EOF
+)"
+  out=$(run_crew_state "$d" feat-newest)
+  assert_not_contains "$out" "source: run-step" "an older superseded row must not be attributed past the newest row"
+  assert_not_contains "$out" "validating (background run)" "a superseded row's run detail must not be emitted"
+  assert_contains "$out" "source: status-log" "with no bindable current run, the reading falls through"
+  pass "the coarse scan stops at the branch's newest row"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -1405,6 +1537,9 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_superseded_terminal_row_not_reported_as_current
+test_coarse_terminal_row_is_not_a_terminal_verdict
+test_coarse_scan_stops_at_the_branch_newest_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
