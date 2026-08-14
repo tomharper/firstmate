@@ -81,6 +81,8 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -294,8 +296,21 @@ normalize_payload() { # <source> <destination>
 # be replayed, so every append - a mirrored line or an escalation this adapter
 # raises itself - is at most once on exact bytes.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
+# Dedup compares each existing line's body with any leading timestamp removed
+# (bin/fm-classify-lib.sh owns that format) rather than the raw bytes. A line this
+# adapter raises itself is stamped at the moment it is written, so the same
+# escalation raised again carries a different stamp, and exact-byte matching would
+# append it a second time. A mirrored line keeps the stamp the secondmate wrote
+# and is appended verbatim; comparing bodies dedups those identically.
 append_status_once() { # <status-file> <line>
-  grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
+  local existing want
+  _fm_status_strip_stamp "$2"; want=$_FM_STATUS_BODY
+  if [ -f "$1" ]; then
+    while IFS= read -r existing || [ -n "$existing" ]; do
+      _fm_status_strip_stamp "$existing"
+      [ "$_FM_STATUS_BODY" != "$want" ] || return 1
+    done < "$1"
+  fi
   printf '%s\n' "$2" >> "$1" || return 2
   return 0
 }
@@ -348,7 +363,7 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    line="$(fm_status_stamp) blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     append_rc=0
     append_status_once "$status_file" "$line" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
@@ -383,7 +398,7 @@ cmd_ingest() {
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done < "$normalized_payload"
   if [ -n "$undelivered" ]; then
-    line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
+    line="$(fm_status_stamp) blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
     append_rc=0
     append_status_once "$status_file" "$line" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append document escalation"; }

@@ -56,6 +56,16 @@ neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
 exit 0
 SH
   chmod +x "$root/bin/fm-guard.sh"
+  # fm-teardown.sh runs the completeness gate out of "$FM_ROOT/bin/" and blocks
+  # on every non-zero rc, including the 127 an absent wrapper would give. This
+  # suite is about Orca dispatch, so the gate is stubbed to its proceed signal;
+  # its own contract (SAT, blocked, and unrunnable) is covered by
+  # tests/fm-teardown.test.sh and tests/fm-completeness.test.sh.
+  cat > "$root/bin/fm-completeness-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$root/bin/fm-completeness-check.sh"
   printf '%s\n' "$root"
 }
 

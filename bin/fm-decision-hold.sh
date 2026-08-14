@@ -452,8 +452,11 @@ EOF
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
       transfer_rc=0
+      # Upstream's self-announcing writer owns the append and its wake bookkeeping;
+      # the leading stamp is added here, to the line handed to it, so the writer's
+      # exact-size assertion still measures the bytes it actually appends.
       fm_wake_status_append_self_announced "$STATE" "$status_file" \
-        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
+        "$(fm_status_stamp) captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
       [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
       key_seen=1
     done <<EOF

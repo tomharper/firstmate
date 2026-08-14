@@ -863,15 +863,21 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
 # that exact escalation remains open. If an unrelated decision has since taken
 # over that key, the close is withheld so the unrelated decision is not cleared.
 fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
-  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key
+  local status_file=$1 rec=$2 corr=$3 line body found='' kind payload own_key
   [ -f "$status_file" ] || return 0
   [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 0
   own_key=$(fm_pending_reply_escalation_key "$corr")
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$(status_line_verb "$line")" = blocked ] || continue
+    # Match the stripped body, not the raw line: every append carries a leading
+    # UTC stamp (bin/fm-classify-lib.sh), so an exact raw-prefix match would
+    # never find the escalation it wrote and the decision would never close.
+    # The RAW line is what is returned, because the caller's key/note parsers
+    # strip the stamp themselves.
+    body=$(status_line_body "$line")
     for kind in missed delivery-unknown recovery-delivery; do
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
-      case "$line" in
+      case "$body" in
         "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
       esac
     done
@@ -1002,9 +1008,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
-  fi
+  # Stamped, at-most-once, through the writer that owns the format
+  # (bin/fm-classify-lib.sh). Dedup compares each existing line's stripped body,
+  # not the raw bytes: this escalation is stamped as it is written, so a replay
+  # carries a different stamp and an exact-byte probe would never match its own
+  # earlier append and would escalate the same blocker again on every pass.
+  fm_status_append_once "$parent_status" "$line" 2>/dev/null || return 1
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1

@@ -279,7 +279,13 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
   status_line=$(tail -1 "$state/hibit.status")
-  case "$status_line" in
+  # The escalation is an ordinary status append, so it carries the shared leading
+  # UTC stamp (bin/fm-classify-lib.sh). Assert against the stripped body so the
+  # keyed-escalation contract is checked independently of the stamp, and assert
+  # the stamp itself separately.
+  [ -n "$(status_line_stamp "$status_line")" ] \
+    || fail "escalation line should carry a status timestamp"$'\n'"$status_line"
+  case "$(status_line_body "$status_line")" in
     "blocked [key=pending-reply-$corr]:"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac

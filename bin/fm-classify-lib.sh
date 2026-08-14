@@ -9,7 +9,8 @@
 #
 # Most functions are pure, side-effect-free reads of status files: each takes
 # what it needs as arguments and touches no globals beyond the optional
-# FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
+# FM_CAPTAIN_RE override and the _FM_STATUS_BODY scratch used by the timestamp
+# strippers. Consumers layer their own dedup/marker state on top (the
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
@@ -77,6 +78,125 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# --- status line timestamps -------------------------------------------------
+#
+# A status append is an EVENT, and an event with no time on it cannot be told
+# apart from the same event three hours ago: a `done:` line read out of the log
+# was reported as current work more than once before this stamp existed. Every
+# scaffolded append therefore carries a leading ISO-8601 UTC stamp,
+#   2026-07-29T09:44:07Z done: PR https://... checks green
+# and this file is the ONE owner of that format: the format string below, the
+# copy-pasteable command bin/fm-brief.sh embeds in every generated status
+# instruction, the fm_status_stamp writers use, and the parsers that strip it.
+#
+# Legacy untimestamped lines stay first-class. Everything below treats a missing
+# stamp as an unknown age, never as an error and never as a guess, so status
+# files written before this contract keep classifying exactly as they did.
+FM_STATUS_STAMP_FORMAT='+%Y-%m-%dT%H:%M:%SZ'
+# The literal single command a crewmate copies into its status append. Kept as a
+# string (not only a function) because the brief scaffold must hand the worker one
+# self-contained line that needs no helper script on its PATH.
+# shellcheck disable=SC2034 # Read by bin/fm-brief.sh, not this lib.
+FM_STATUS_STAMP_CMD_DEFAULT="date -u $FM_STATUS_STAMP_FORMAT"
+# Bash glob matching exactly one stamp. Only the Z (UTC) form this repo emits is
+# recognized; anything else is left alone as ordinary line text.
+_FM_STATUS_STAMP_GLOB='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'
+
+# Current stamp, for firstmate-side writers that append to a status file.
+fm_status_stamp() {
+  date -u "$FM_STATUS_STAMP_FORMAT"
+}
+
+# Strip a leading stamp, publishing the remainder in _FM_STATUS_BODY. The one
+# deliberate scratch global in this file: the verb/note/key parsers below run
+# once per line of a whole-file fold, so this stays a plain assignment instead of
+# a command substitution per line. Callers outside this file use status_line_body.
+_fm_status_strip_stamp() {  # <status-line>
+  _FM_STATUS_BODY=$1
+  # shellcheck disable=SC2254 # deliberate glob match, not a literal comparison.
+  case "$_FM_STATUS_BODY" in
+    $_FM_STATUS_STAMP_GLOB\ *) _FM_STATUS_BODY=${_FM_STATUS_BODY#* } ;;
+  esac
+}
+
+# The status line with any leading stamp removed (unchanged when unstamped).
+status_line_body() {  # <status-line>
+  _fm_status_strip_stamp "$1"
+  printf '%s' "$_FM_STATUS_BODY"
+}
+
+# Append one firstmate-written status line, stamped, at most once. Dedup compares
+# each existing line's stripped body rather than the whole line, because the stamp
+# this writer adds differs on every replay and a whole-line probe would therefore
+# never match its own earlier append. Returns non-zero only when the append fails.
+fm_status_append_once() {  # <status-file> <line-body>
+  local file=$1 body=$2 existing
+  if [ -f "$file" ]; then
+    while IFS= read -r existing || [ -n "$existing" ]; do
+      _fm_status_strip_stamp "$existing"
+      [ "$_FM_STATUS_BODY" != "$body" ] || return 0
+    done < "$file"
+  fi
+  printf '%s %s\n' "$(fm_status_stamp)" "$body" >> "$file" || return 1
+}
+
+# The leading stamp of a status line, empty when the line carries none.
+status_line_stamp() {  # <status-line>
+  # shellcheck disable=SC2254 # deliberate glob match, not a literal comparison.
+  case "$1" in
+    $_FM_STATUS_STAMP_GLOB\ *) printf '%s' "${1%% *}" ;;
+    $_FM_STATUS_STAMP_GLOB) printf '%s' "$1" ;;
+  esac
+}
+
+# Epoch seconds for a stamp; returns 1 without printing for an absent or
+# unparseable one, so callers report an unknown age rather than a wrong one.
+# Pure integer arithmetic (Howard Hinnant's days_from_civil) rather than date(1),
+# because the GNU and BSD parse flags differ and a silently misparsed stamp would
+# be worse than no stamp at all.
+status_stamp_epoch() {  # <stamp>
+  local s=$1 y m d hh mm ss era yoe doy doe days
+  # shellcheck disable=SC2254 # deliberate glob match, not a literal comparison.
+  case "$s" in
+    $_FM_STATUS_STAMP_GLOB) ;;
+    *) return 1 ;;
+  esac
+  y=$((10#${s:0:4})); m=$((10#${s:5:2})); d=$((10#${s:8:2}))
+  hh=$((10#${s:11:2})); mm=$((10#${s:14:2})); ss=$((10#${s:17:2}))
+  { [ "$m" -ge 1 ] && [ "$m" -le 12 ] && [ "$d" -ge 1 ] && [ "$d" -le 31 ]; } || return 1
+  { [ "$hh" -le 23 ] && [ "$mm" -le 59 ] && [ "$ss" -le 60 ]; } || return 1
+  if [ "$m" -le 2 ]; then y=$((y - 1)); fi
+  era=$(( y / 400 ))
+  yoe=$(( y - era * 400 ))
+  if [ "$m" -gt 2 ]; then doy=$(( (153 * (m - 3) + 2) / 5 + d - 1 ))
+  else doy=$(( (153 * (m + 9) + 2) / 5 + d - 1 )); fi
+  doe=$(( yoe * 365 + yoe / 4 - yoe / 100 + doy ))
+  days=$(( era * 146097 + doe - 719468 ))
+  printf '%s' "$(( days * 86400 + hh * 3600 + mm * 60 + ss ))"
+}
+
+# Age in seconds of a stamped status line; returns 1 without printing when the
+# line has no parseable stamp. A stamp in the future (clock skew) reads as 0.
+status_line_age_secs() {  # <status-line> [now-epoch]
+  local line=$1 now=${2:-} stamp epoch
+  stamp=$(status_line_stamp "$line")
+  [ -n "$stamp" ] || return 1
+  epoch=$(status_stamp_epoch "$stamp") || return 1
+  [ -n "$now" ] || now=$(date -u +%s)
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$now" -le "$epoch" ]; then printf '0'; else printf '%s' "$(( now - epoch ))"; fi
+}
+
+# Human-scaled age for a duration in seconds: 45s, 12m, 2h14m, 3d4h.
+fm_format_age() {  # <seconds>
+  local s=$1
+  case "$s" in ''|*[!0-9]*) printf 'unknown'; return ;; esac
+  if [ "$s" -lt 60 ]; then printf '%ss' "$s"
+  elif [ "$s" -lt 3600 ]; then printf '%sm' "$(( s / 60 ))"
+  elif [ "$s" -lt 86400 ]; then printf '%sh%sm' "$(( s / 3600 ))" "$(( s % 3600 / 60 ))"
+  else printf '%sd%sh' "$(( s / 86400 ))" "$(( s % 86400 / 3600 ))"; fi
+}
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -117,7 +237,9 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  # Match the body, not the raw line, so a leading timestamp cannot sit between a
+  # custom FM_CAPTAIN_RE's anchor and the verb it anchors to.
+  status_line_body "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -181,7 +303,11 @@ status_is_paused_or_captain_held() {  # <status-line>
 # number of "[name=value]" tags before the colon, in any order, so verb parsing
 # ends at the first tag rather than special-casing "[key=...]".
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*}
+  # Drop any leading timestamp first: its own colons would otherwise be read as
+  # the verb separator and yield "2026-08-14T15" as the verb.
+  local v
+  _fm_status_strip_stamp "$1"
+  v=${_FM_STATUS_BODY%%:*}
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
@@ -190,7 +316,9 @@ status_line_verb() {  # <status-line> -> leading verb word
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
 _fm_key_before_colon() {  # <status-line>
-  case "${1%%:*}" in
+  local body
+  _fm_status_strip_stamp "$1"; body=$_FM_STATUS_BODY
+  case "${body%%:*}" in
     *\[key=*\]*) return 0 ;;
     *) return 1 ;;
   esac
@@ -201,9 +329,10 @@ _fm_key_before_colon() {  # <status-line>
 # the caller's check via _fm_decision_slug_ok, exactly as for the before-colon
 # position.
 _fm_key_at_note_head() {  # <status-line> -> raw slug
-  local rest
-  case "$1" in
-    *:*) rest=${1#*:} ;;
+  local rest body
+  _fm_status_strip_stamp "$1"; body=$_FM_STATUS_BODY
+  case "$body" in
+    *:*) rest=${body#*:} ;;
     *) return 1 ;;
   esac
   rest=${rest#"${rest%%[![:space:]]*}"}
@@ -220,15 +349,16 @@ _fm_decision_slug_ok() {  # <slug>
   esac
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  local n k
-  case "$1" in
-    *:*) n=${1#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
-    *) printf '%s' "$1"; return 0 ;;
+  local n k body
+  _fm_status_strip_stamp "$1"; body=$_FM_STATUS_BODY
+  case "$body" in
+    *:*) n=${body#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
+    *) printf '%s' "$body"; return 0 ;;
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_head "$1") \
+  if ! _fm_key_before_colon "$body" && k=$(_fm_key_at_note_head "$body") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
@@ -236,13 +366,14 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   printf '%s' "$n"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local k
-  if _fm_key_before_colon "$1"; then
-    k=${1%%:*}
+  local k body
+  _fm_status_strip_stamp "$1"; body=$_FM_STATUS_BODY
+  if _fm_key_before_colon "$body"; then
+    k=${body%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+    k=$(_fm_key_at_note_head "$body") || { printf 'default'; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"

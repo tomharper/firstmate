@@ -710,6 +710,52 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_status_instruction_is_one_stamped_line() {
+  local home kind id brief instruction status_file line
+  home="$TMP_ROOT/stamped-status-home"
+  mkdir -p "$home/data" "$home/state"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  for kind in ship scout secondmate; do
+    id="brief-stamp-$kind"
+    case "$kind" in
+      ship)   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 ;;
+      scout)  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+        "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # shellcheck disable=SC2016 # The scaffolded command must reach the worker unexpanded.
+    assert_grep 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) {state}: {one short line}" >>' "$brief" \
+      "$kind brief did not scaffold a timestamped status append"
+
+    # Exactly one line carries the whole instruction: no helper script to find,
+    # no second line to remember.
+    instruction=$(grep -c 'date -u +%Y-%m-%dT%H:%M:%SZ' "$brief")
+    [ "$instruction" = 1 ] \
+      || fail "$kind brief must carry exactly one status-append command, found $instruction"
+
+    # Run the scaffolded command as a worker would, then classify what it wrote.
+    status_file="$home/state/$id.status"
+    instruction=$(grep -o 'echo "[^"]*" >> .*' "$brief" | head -1)
+    instruction=${instruction%\`*}
+    eval "${instruction/\{state\}: \{one short line\}/done: PR https://x/y/pull/1 checks green}" \
+      || fail "$kind brief's scaffolded status command failed to run"
+    line=$(last_status_line "$status_file")
+    [ -n "$(status_line_stamp "$line")" ] \
+      || fail "$kind brief's status command wrote no timestamp: $line"
+    [ "$(status_line_verb "$line")" = "done" ] \
+      || fail "$kind brief's stamped status line did not classify as done: $line"
+    status_is_captain_relevant "$line" \
+      || fail "$kind brief's stamped status line lost captain relevance: $line"
+    [ "$(status_line_age_secs "$line")" -lt 120 ] \
+      || fail "$kind brief's fresh status line did not read as fresh: $line"
+  done
+  pass "fm-brief.sh: every scaffold's status append is one copy-pasteable timestamped line"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -730,3 +776,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_status_instruction_is_one_stamped_line

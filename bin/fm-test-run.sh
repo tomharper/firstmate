@@ -883,8 +883,22 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-classify-lib.sh)
+      # Owner of the status-line stamp contract, so its blast radius is every
+      # suite whose script parses a status line through it, not the wake
+      # families alone: fm-brief.sh and fm-crew-state.sh (pure-contract-unit),
+      # fm-spawn.sh (backend-dispatch), the brief-scaffolded status-append
+      # instruction (secondmate), fm-fleet-snapshot.sh (snapshot-bearings), and
+      # the pending-reply suite that also covers fm-secondmate-report.sh.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
+      printf '%s\n' secondmate
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' "__script__:fm-pending-reply.test.sh"
       ;;
     bin/fm-afk*)
       printf '%s\n' afk

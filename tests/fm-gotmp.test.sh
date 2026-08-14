@@ -90,6 +90,17 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
+  # fm-completeness-check.sh: stub at its proceed signal (exit 0). Teardown runs
+  # the real gate out of "$FM_ROOT/bin/" and blocks on any other rc, including
+  # the 127 an absent wrapper gives; this fixture's ship task deliberately points
+  # at a nonexistent worktree, so a real gate would refuse for reasons that have
+  # nothing to do with tasktmp cleanup. The gate's own contract lives in
+  # tests/fm-teardown.test.sh and tests/fm-completeness.test.sh.
+  cat > "$fake/bin/fm-completeness-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/bin/fm-completeness-check.sh"
   # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
@@ -166,6 +177,13 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
+  # Completeness gate stubbed at its proceed signal, for the same reason as in
+  # make_fake_root above.
+  cat > "$fake/bin/fm-completeness-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/bin/fm-completeness-check.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH

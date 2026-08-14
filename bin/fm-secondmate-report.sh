@@ -25,6 +25,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 usage() {
   cat <<'EOF' >&2
@@ -68,21 +70,24 @@ if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
 fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
+# Leading UTC stamp, like every other status append (bin/fm-classify-lib.sh), so
+# the parent can tell a fresh report from one that has sat in the log.
+stamp=$(fm_status_stamp)
 if [ "$DOC_MODE" = 1 ]; then
   [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    printf '%s %s [%s]: %s (%s via-helper)\n' "$stamp" "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    printf '%s %s [%s]: %s (via-helper)\n' "$stamp" "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    printf '%s %s [%s]: %s (via-helper)\n' "$stamp" "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    printf '%s %s [%s]: (via-helper)\n' "$stamp" "$VERB" "$token" >> "$STATUS_FILE"
   fi
 fi
