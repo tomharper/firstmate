@@ -160,6 +160,7 @@ tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
+tests/fm-ground.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
 tests/fm-pi-primary-types.test.sh

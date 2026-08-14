@@ -138,7 +138,8 @@ family_for_basename() {
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|\
+    fm-ground.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -284,6 +285,7 @@ tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-ensure-agents-md.test.sh
+tests/fm-ground.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
@@ -317,6 +319,7 @@ tests/fm-lint.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-review-diff.test.sh
 tests/fm-brief.test.sh
+tests/fm-ground.test.sh
 tests/fm-transition-lib.test.sh
 EOF
 }
@@ -975,7 +978,7 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
-    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
+    bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|bin/fm-ground.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\

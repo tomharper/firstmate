@@ -52,6 +52,11 @@
 # Every generated status instruction is one copy-pasteable line that stamps the
 # append with UTC time, so a supervisor can tell a fresh event from a stale one;
 # fm-classify-lib.sh owns the stamp format (FM_STATUS_STAMP_CMD_DEFAULT).
+# Ship and scout briefs also carry the target repo's ground truth resolved by
+# fm-ground.sh from data/repos/<key>.md, as a binding do-not-re-derive section, so
+# a worker starts from the repo's established architecture and studied tool
+# choices. A repo with no ground-truth file scaffolds normally and warns on
+# stderr, so the gap is visible rather than silently guessed.
 # Ship and scout briefs also scaffold an agent-maintained working log at
 # data/<task-id>/log.md: the crewmate's own durable memory, written as it works,
 # and the resume path when a relaunch discards its context. It survives teardown
@@ -283,6 +288,27 @@ fi
 
 REPO=${POS[1]}
 
+# Ground truth: established facts about the target repo (architecture, providers,
+# studied techniques, hard constraints) so the crewmate never re-improvises them.
+# Resolved from data/repos/<key>.md through fm-ground.sh; empty plus a stderr
+# warning when the repo has none, so the gap is visible rather than silently
+# guessed. Grounding is additive and never blocks a dispatch. The secondmate
+# charter path has already exited above, so a charter never carries ground truth.
+GROUND_RAW="$("$SCRIPT_DIR/fm-ground.sh" "$REPO" 2>/dev/null || true)"
+if [ -n "$GROUND_RAW" ]; then
+  GROUND="
+# Repo ground truth - authoritative, do not re-derive or guess
+The facts below about this repo are established. Treat them as binding: never
+improvise architecture (storage, providers, models, how it runs) that contradicts
+them, and never reach for the cheapest available tool - every choice here is studied.
+
+$GROUND_RAW
+"
+else
+  GROUND=""
+  echo "fm-brief: WARNING - no ground truth for '$REPO' (data/repos/). The crewmate starts ungrounded and may guess the architecture; consider adding a data/repos/ file first." >&2
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -334,7 +360,7 @@ WORKLOG_SECTION=${WORKLOG_SECTION%$'\n'}
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+$GROUND
 # Task
 {TASK}
 
@@ -448,7 +474,7 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
+$GROUND
 # Task
 {TASK}
 

@@ -814,6 +814,35 @@ test_ship_setup_step_is_resume_aware() {
   pass "fm-brief.sh: ship setup step routes a resuming worker to its working log"
 }
 
+test_ground_truth_is_injected_into_ship_and_scout_briefs() {
+  local home err
+  home="$TMP_ROOT/ground-home"
+  mkdir -p "$home/data/repos"
+  printf 'repo-path: /opt/acme\n\n- Storage is Postgres, never SQLite.\n' > "$home/data/repos/acme.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-ship acme --mode no-mistakes >/dev/null 2>&1
+  assert_grep "Repo ground truth - authoritative, do not re-derive or guess" \
+    "$home/data/brief-ground-ship/brief.md" "ship brief lost the ground-truth heading"
+  assert_grep "Storage is Postgres, never SQLite." \
+    "$home/data/brief-ground-ship/brief.md" "ship brief lost the ground-truth body"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-scout acme --scout >/dev/null 2>&1
+  assert_grep "Storage is Postgres, never SQLite." \
+    "$home/data/brief-ground-scout/brief.md" "scout brief lost the ground-truth body"
+
+  # An ungrounded dispatch still produces a brief, and says so on stderr.
+  err="$TMP_ROOT/ground-warn.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-none otherproj --mode no-mistakes >/dev/null 2>"$err"
+  [ -f "$home/data/brief-ground-none/brief.md" ] \
+    || fail "a repo with no ground truth must still scaffold a brief"
+  assert_grep "no ground truth for 'otherproj'" "$err" \
+    "an ungrounded dispatch must warn on stderr"
+  if grep -q "Repo ground truth" "$home/data/brief-ground-none/brief.md"; then
+    fail "an ungrounded brief must not carry an empty ground-truth section"
+  fi
+  pass "fm-brief.sh: ground truth reaches ship and scout briefs, and its absence warns"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -837,3 +866,4 @@ test_scout_and_secondmate_scaffold
 test_status_instruction_is_one_stamped_line
 test_ship_and_scout_briefs_scaffold_working_log
 test_ship_setup_step_is_resume_aware
+test_ground_truth_is_injected_into_ship_and_scout_briefs
