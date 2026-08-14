@@ -155,6 +155,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-brief.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-composer-ghost.test.sh
+tests/fm-completeness.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh

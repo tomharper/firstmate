@@ -9,13 +9,18 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# Usage: fm-merge-local.sh <task-id>
+# The formal completeness gate (bin/fm-completeness-check.sh --gate merge) runs
+# first: assert the captain's approval through FM_CAPTAIN_APPROVED
+# (granted|yes|1|true, or not_required under yolo). With the solver installed an
+# unasserted approval blocks the merge; without it the gate steps aside.
+# Usage: FM_CAPTAIN_APPROVED=granted fm-merge-local.sh <task-id>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
@@ -40,6 +45,30 @@ default_branch() {
   done
   return 1
 }
+
+# Formal completeness gate: this local merge IS firstmate exercising the captain's
+# merge authority, so the captain's word must be asserted explicitly through
+# $FM_CAPTAIN_APPROVED (granted | yes | 1 | true; or not_required under yolo). The
+# gate STEPS ASIDE when the solver tooling is absent, so existing setups keep
+# working until they install it; once installed, an unasserted approval blocks.
+# Exit 0 is the gate's ONLY proceed signal (SAT, the off-switch, and fail-open all
+# exit 0), so every other rc blocks: 2 is UNSAT, 64 is invalid facts, 3 is
+# strict-mode enforcement, and anything else means the gate could not run at all.
+set +e
+gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+  "$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
+gate_rc=$?
+set -e
+if [ "$gate_rc" != 0 ]; then
+  printf '%s\n' "$gate_out" >&2
+  case "$gate_rc" in
+    2|3|64) ;;
+    *) echo "completeness gate could not run (exit $gate_rc); treating that as blocking." >&2 ;;
+  esac
+  echo "REFUSED: completeness gate blocked the local merge of $ID." >&2
+  echo "Assert the captain's approval explicitly, e.g. FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID" >&2
+  exit 1
+fi
 
 BRANCH="fm/$ID"
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }

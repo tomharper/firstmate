@@ -1,0 +1,15 @@
+# Firstmate's optional Python dependencies. This file is the declaration; the
+# prose surfaces point here rather than naming packages or install flags.
+#
+#   python3 -m pip install -r requirements.txt
+#
+# z3-solver powers the formal completeness gate (bin/fm-completeness-check.sh).
+# It stays OPTIONAL: nothing here is a boot requirement, its absence is never a
+# MISSING line, and without it the gate steps aside so the bash lifecycle checks
+# remain the hard guarantee (FM_COMPLETENESS_STRICT=1 is the only way to make
+# that absence refuse). Installing it only has to make z3 importable by the
+# python3 already on PATH, because the gate imports the solver with that
+# ambient interpreter.
+#
+# A floor, not a pin, so an optional capability can move forward.
+z3-solver>=4.12

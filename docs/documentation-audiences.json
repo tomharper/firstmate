@@ -377,6 +377,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "requirements.txt",
+      "audience": "operator-current"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }

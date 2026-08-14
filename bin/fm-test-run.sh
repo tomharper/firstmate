@@ -204,6 +204,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
+    fm-completeness.test.sh|\
     fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
@@ -290,6 +291,7 @@ tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-completeness.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
 tests/fm-send-popup-settle.test.sh
@@ -331,6 +333,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-arm-pretool-check.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-herdr-lab.test.sh
+tests/fm-completeness.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-send-popup-settle.test.sh
 tests/fm-tmux-submit-busy.test.sh
@@ -946,6 +949,12 @@ families_for_changed_path() {
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
+      printf '%s\n' pr-forge
+      ;;
+    bin/fm-completeness*|requirements.txt)
+      # The gate and its rules data guard fm-teardown.sh and fm-merge-local.sh,
+      # and requirements.txt is the declaration of the gate's optional solver
+      # dependency that the completeness suite asserts still exists.
       printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)
