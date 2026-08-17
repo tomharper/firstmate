@@ -22,8 +22,10 @@ No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign 
 A `kind=secondmate` task's status signal is the parent-directed reply stream and is never absorbed as provably working; only its bare turn-ended signal retains the ordinary absorb rule.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 A crew whose work is complete shares that cadence for the same reason: its next move belongs to whoever holds merge or decision authority, so an idle pane is the expected outcome rather than a symptom.
-Completion is read from the task's own armed merge poll, which still answers after the worker exits and its endpoint is gone, and otherwise from `bin/fm-crew-state.sh` reporting `done` for a task with no pull request to poll.
-A run held at a no-mistakes approval or fix-review gate is deliberately excluded: it is waiting on a decision, and the repeated surface is the pressure that gets that decision made.
+Completion is read from the task's own armed merge poll, which still answers after the worker exits and its endpoint is gone.
+That record is consulted LAST, after every live reading, because the class silences an alarm and so every ambiguity resolves toward still alarming.
+A declared pause, a live `working` run-step or busy pane, a run parked at a gate, a declared blocker, and a failed run all outrank it, and a `done` reading with no merge poll behind it is not treated as complete at all.
+A run held at a no-mistakes approval or fix-review gate is excluded for the sharpest version of that reason: it is waiting on a decision, and the repeated surface is the pressure that gets that decision made.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.

@@ -51,6 +51,40 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
+# Wait until the watcher has actually FINISHED one triage cycle, rather than
+# sleeping out a fixed budget. wait_live below returns only after burning its
+# whole budget when the process stays alive - which is the expected outcome for
+# an ABSORBED round - so a budget large enough to be correct on a loaded host is
+# also paid in full on every quiet round.
+#
+# The evidence is the triage log growing, not the stale counter: fm-watch.sh
+# writes .count-<key> BEFORE it decides anything, so waiting on the counter can
+# return mid-decision and let the caller reap the watcher before it appends its
+# wake. Every triage branch ends in a triage_log line, and a branch that surfaces
+# instead exits the process, so "log grew or process gone" covers both outcomes
+# exactly. Returns 0 while the watcher is still alive (the caller reaps it), 1 if
+# it exited on its own first.
+wait_triage_cycle() {  # <pid> <state> <baseline-lines> [limit-ticks]
+  local pid=$1 state=$2 baseline=$3 limit=${4:-100} i=0 lines
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    lines=$(triage_lines "$state")
+    [ "$lines" -gt "$baseline" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Lines currently in the watcher's triage log, as the baseline for the wait above.
+triage_lines() {  # <state>
+  local n
+  [ -f "$1/.watch-triage.log" ] || { printf '0'; return; }
+  n=$(wc -l < "$1/.watch-triage.log")
+  n=${n//[[:space:]]/}
+  case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
+}
+
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
 wait_live() {
   local pid=$1 limit=${2:-30} i=0
@@ -420,51 +454,82 @@ test_crew_absorb_class_classifier() {
 # move belongs to the merge or decision authority, not the worker. Without it a
 # task waiting on the captain's merge is indistinguishable from a wedged one,
 # because every question the watcher can ask about the pane has the same answer
-# for both. The two sources are asserted separately because they answer in
-# different situations: the durable armed merge poll still answers for a worker
-# that exited, while the crew-state read covers a task that has no pull request
-# to poll at all.
+# for both.
+#
+# The PRECEDENCE is what this test is really about, and it is a safety ordering
+# rather than a convenience: the class silences an alarm, so every ambiguity
+# resolves toward still alarming. The durable merge poll is consulted LAST,
+# because it is the only source that still answers for an exited worker but the
+# weakest evidence about what a live one is doing. Every live reading that says a
+# human must look - working, parked, blocked, failed - outranks it.
 test_crew_absorb_class_complete_classifier() {
   local dir fakebin state
   dir=$(make_case absorb-class-complete); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
 
-  # Source 2 first, with no poll armed: an authoritative done covers a local-only
-  # task whose captain approves a branch rather than a pull request.
+  # A bare done, with no merge poll behind it, is NOT complete. It returns none,
+  # exactly as it did before this class existed. Pinned explicitly so the dropped
+  # source cannot be quietly reintroduced: such a task can be one whose run
+  # finished and which was then given new work, where the run-step stays
+  # authoritative over the pane and still reads done while the crew is live.
   FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
-  [ "$(crew_absorb_class localonly "$state")" = complete ] || fail "an authoritative done was not classed complete"
-  crew_is_complete localonly "$state" || fail "crew_is_complete did not recognize a done verdict"
-  ! crew_is_provably_working localonly "$state" || fail "a complete crew was treated as provably working"
-  ! crew_is_paused localonly "$state" || fail "a complete crew was treated as paused"
+  [ "$(crew_absorb_class nopoll "$state")" = none ] \
+    || fail "a bare done with no merge poll was absorbed as complete"
+  ! crew_is_complete nopoll "$state" || fail "crew_is_complete accepted a bare done"
 
-  # Source 1: a real armed merge poll, built through the production path.
+  # With a real armed merge poll, built through the production path, that same
+  # done reading IS complete - this is the ordinary awaiting-merge shape.
   printf 'window=firstmate:fm-merging\nkind=ship\n' > "$state/merging.meta"
   arm_merge_poll "$state" merging
-  # It outranks a working run-step ON PURPOSE. no-mistakes keeps its ci step
-  # running for the whole merge-monitor phase, long after checks go green, so
-  # this exact reading persists for as long as the captain takes to merge.
-  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
   [ "$(crew_absorb_class merging "$state")" = complete ] \
-    || fail "an armed merge poll did not outrank a monitor-phase working read"
-  # And it still answers once the worker is gone, where every live read cannot.
+    || fail "an armed merge poll plus a done reading was not classed complete"
+  crew_is_complete merging "$state" || fail "crew_is_complete did not recognize the complete verdict"
+  ! crew_is_provably_working merging "$state" || fail "a complete crew was treated as provably working"
+  ! crew_is_paused merging "$state" || fail "a complete crew was treated as paused"
+
+  # It still answers once the worker is gone, where every live read cannot. This
+  # is the case the durable record exists for, and the exited-worker half of the
+  # reproduction below.
   FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
   [ "$(crew_absorb_class merging "$state")" = complete ] \
     || fail "an armed merge poll stopped answering for an exited worker"
+  # An unreadable verdict must reach the poll too, not short-circuit before it.
+  FM_FAKE_CREW_STATE='not a state line at all'
+  [ "$(crew_absorb_class merging "$state")" = complete ] \
+    || fail "an unparseable crew-state line short-circuited past the durable record"
 
-  # The boundaries. A task with no completion record keeps its old verdict, which
-  # is what preserves the escalation ladder for anything genuinely stuck.
+  # THE SAFETY ORDERING. Every live reading that says a human must look outranks
+  # the poll, on the SAME task whose poll is armed.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  [ "$(crew_absorb_class merging "$state")" = working ] \
+    || fail "an armed merge poll silenced a live working run-step"
+  crew_is_provably_working merging "$state" || fail "the signal path lost a provably-working verdict"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  [ "$(crew_absorb_class merging "$state")" = working ] \
+    || fail "an armed merge poll silenced a busy pane"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s)'
+  [ "$(crew_absorb_class merging "$state")" = none ] \
+    || fail "an armed merge poll silenced a run parked at a decision gate"
+  FM_FAKE_CREW_STATE='state: blocked · source: status-log · needs a credential'
+  [ "$(crew_absorb_class merging "$state")" = none ] \
+    || fail "an armed merge poll silenced a declared blocker"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class merging "$state")" = none ] \
+    || fail "an armed merge poll silenced a failed run"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class merging "$state")" = paused ] \
+    || fail "an armed merge poll overrode a declared pause"
+
+  # A task with no completion record keeps its old verdict, which is what
+  # preserves the escalation ladder for anything genuinely stuck.
   FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   [ "$(crew_absorb_class stuck "$state")" = none ] || fail "a stuck crew was classed complete"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   [ "$(crew_absorb_class stuck "$state")" = working ] || fail "an active run lost its working class"
-  # A run held at a gate is also waiting on a human, but it is waiting on a
-  # DECISION, and the repetition is the pressure that gets that decision made.
-  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s)'
-  [ "$(crew_absorb_class stuck "$state")" = none ] || fail "a parked gate was absorbed as complete"
 
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: complete from an armed merge poll or an authoritative done; stuck, working and parked unaffected"
+  pass "crew_absorb_class: the armed merge poll is the last resort, and working, parked, blocked, failed and paused all outrank it"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1061,7 +1126,7 @@ test_complete_stale_resurfaces_on_the_bounded_cadence() {
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare baseline
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -1079,17 +1144,17 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 
   round=1
   while [ "$round" -le 6 ]; do
+    baseline=$(triage_lines "$state")
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    # The budget must outlast one whole watcher cycle, or every round is killed
-    # before the stale path runs and the bounded recheck below can never be
-    # observed - a machine-speed-dependent failure, since a loaded host needs
-    # several seconds to reach the first wake. Matches the more generous
-    # sibling budgets in this file rather than racing the watcher.
-    if wait_live "$pid" 100; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
+    # Wait for the round's own triage cycle rather than a fixed budget. The old
+    # 1.5s budget was simply too short - a loaded host needs several seconds to
+    # reach the first wake, so every round was killed before the stale path ran
+    # and the bounded recheck this test asserts could never be observed.
+    if wait_triage_cycle "$pid" "$state" "$baseline" 100; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
     round=$((round + 1))
   done
   [ -s "$state/.wake-queue" ] || fail "dead-agent declared pause queued no wake at all across six unchanged polls"

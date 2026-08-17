@@ -1238,26 +1238,49 @@ signal_reason_is_actionable() {  # <file> ...
 #   none     - none of those, so the wake must surface (a stopped/parked/failed/
 #              torn-down/unknown crew, or an unreadable verdict).
 #
-# `complete` is read from two independent sources, durable one first:
-#   1. An armed merge poll (fm_pr_merge_poll_armed, bin/fm-pr-lib.sh). This is
-#      the source that matters, because it is a record on disk rather than a
-#      live read: it still answers for a worker that exited and for an endpoint
-#      that is gone, which is precisely where every live source goes silent and
-#      the pane looks indistinguishable from a wedge. It also outranks a
-#      `working` run-step by design - no-mistakes keeps its ci step running for
-#      the whole merge-monitor phase, long after checks are green, so a task
-#      whose poll is armed reads as working forever while nothing is left to do.
-#   2. Otherwise fm-crew-state.sh reporting `done`, which covers a task with no
-#      pull request to poll (a local-only branch waiting on the captain's word).
-# Deliberately NOT `parked`: a run held at an approval or fix-review gate is also
-# waiting on a human, but it is waiting on a DECISION, and the repetition is the
-# pressure that gets that decision made.
+# THE GOVERNING RULE FOR THIS FUNCTION: it exists to SILENCE an alarm, so every
+# ambiguity resolves toward STILL ALARMING. A false alarm costs attention; a
+# suppressed real one cost 75 minutes on 2026-08-17, when a genuine wedge ran
+# unnoticed inside noise its reader had learned to dismiss. That asymmetry
+# decides every precedence question below.
 #
-# Otherwise one fm-crew-state.sh read serves the remaining absorb reasons at
-# once, from its one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Reading the state authoritatively
-# (not the status log) is what keeps run-step precedence: a crew that appended
-# paused: but then STARTED a run reports working, never paused.
+# Precedence, in order, and the reason for the order:
+#   1. crew-state `paused`                       -> paused
+#   2. crew-state `working` from run-step or pane -> working
+#   3. crew-state `parked`, `blocked` or `failed` -> none
+#   4. otherwise, an armed merge poll             -> complete
+#   5. otherwise                                  -> none
+#
+# The armed merge poll (fm_pr_merge_poll_armed, bin/fm-pr-lib.sh) is LAST, not
+# first. It is the only source that still answers after the worker exits and its
+# endpoint is gone, which is exactly the case a live read cannot cover and the
+# reason it exists at all - but it is also the weakest evidence about what the
+# worker is doing RIGHT NOW, so it may only speak where no live reading does.
+# Letting it outrank a live `working` would mean a genuinely working crew could
+# be classified complete and go quiet, which is the precise failure this class
+# was added to prevent.
+# Steps 3 and 4 are the same rule seen twice: a reading that says a human must
+# look at this - a run parked at a gate, a declared blocker, a failed run - is
+# never silenced by a durable completion record. `parked` in particular waits on
+# a DECISION, and the repeated surface is the pressure that gets it made.
+# Everything else falls through to step 4: a `done` reading, an `unknown` one, a
+# `working` one from the status-log fallback (no live evidence behind it), and a
+# line that does not parse at all. That last case is load-bearing rather than
+# defensive - an exited worker whose endpoint is gone produces no readable live
+# state, and the durable record is the whole answer for it.
+# There is deliberately NO bare `done` -> complete source. A `done` reading with
+# no merge poll behind it returns `none`, exactly as it did before this class
+# existed. Such a task can be one whose run finished and which was then given new
+# work: the run-step stays authoritative over the pane, so it still reads `done`
+# while the crew is live, and absorbing it would narrow the wedge ladder in a way
+# no reviewer was told about. An undisclosed narrowing is worse than the
+# narrowing itself.
+#
+# One fm-crew-state.sh read serves every live answer at once, from its one
+# authoritative current-state line ("state: <s> · source: <src> · <detail>").
+# Reading the state authoritatively (not the status log) is what keeps run-step
+# precedence: a crew that appended paused: but then STARTED a run reports
+# working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # <state-dir> defaults to the caller's own STATE, exactly as window_to_task does.
@@ -1265,18 +1288,23 @@ signal_reason_is_actionable() {  # <file> ...
 crew_absorb_class() {  # <id> [state-dir]
   local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line crew_state src
   [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    state:*)
+      crew_state=${line#state: }; crew_state=${crew_state%% *}
+      case "$crew_state" in
+        paused) printf 'paused'; return ;;
+        parked|blocked|failed) printf 'none'; return ;;
+        working)
+          src=${line#*source: }; src=${src%% *}
+          case "$src" in run-step|pane) printf 'working'; return ;; esac
+          ;;
+      esac
+      ;;
+  esac
   if [ -n "$state" ] && fm_pr_merge_poll_armed "$state" "$id"; then
     printf 'complete'
     return
-  fi
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  crew_state=${line#state: }; crew_state=${crew_state%% *}
-  if [ "$crew_state" = paused ]; then printf 'paused'; return; fi
-  if [ "$crew_state" = "done" ]; then printf 'complete'; return; fi
-  if [ "$crew_state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
 }
