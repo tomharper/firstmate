@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
+# tests, declared-external-wait vocabulary, and the working/paused/complete absorb
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
@@ -15,10 +15,12 @@
 # signatures).
 #
 # There are two documented exceptions. The absorb classification
-# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
-# read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
-# to decide whether a crew that just stopped its turn or went stale is working,
-# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
+# (crew_absorb_class and its working/paused/complete wrappers) is NOT a pure
+# status-file read: it reads the task's durable merge-poll record and reuses
+# bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
+# whether a crew that just stopped its turn or went stale is working,
+# deliberately paused, finished, or none of those. Callers run it ONLY on
+# no-verb signal handling
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
 # stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
@@ -30,6 +32,11 @@
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+
+# The merge-poll artifacts owner, for the durable "complete, waiting on the merge
+# authority" half of the absorb classification below.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
@@ -1216,30 +1223,58 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
-# Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
-# from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced.
+# Prints exactly one token:
+#   complete - the crew's work is FINISHED and no worker action can advance it:
+#              the next move belongs to whoever holds merge or decision
+#              authority. An idle pane is the expected outcome here, not a
+#              symptom, so supervision owes this a bounded recheck rather than a
+#              wedge escalation;
+#   working  - an actively-running no-mistakes step (running/fixing/ci) or a busy
+#              pane; the crew is legitimately mid-work on a static-looking pane
+#              (e.g. waiting on CI);
+#   paused   - the crew's authoritative current state is a declared external-wait
+#              pause (paused:), which is EXPECTED to idle;
+#   none     - none of those, so the wake must surface (a stopped/parked/failed/
+#              torn-down/unknown crew, or an unreadable verdict).
+#
+# `complete` is read from two independent sources, durable one first:
+#   1. An armed merge poll (fm_pr_merge_poll_armed, bin/fm-pr-lib.sh). This is
+#      the source that matters, because it is a record on disk rather than a
+#      live read: it still answers for a worker that exited and for an endpoint
+#      that is gone, which is precisely where every live source goes silent and
+#      the pane looks indistinguishable from a wedge. It also outranks a
+#      `working` run-step by design - no-mistakes keeps its ci step running for
+#      the whole merge-monitor phase, long after checks are green, so a task
+#      whose poll is armed reads as working forever while nothing is left to do.
+#   2. Otherwise fm-crew-state.sh reporting `done`, which covers a task with no
+#      pull request to poll (a local-only branch waiting on the captain's word).
+# Deliberately NOT `parked`: a run held at an approval or fix-review gate is also
+# waiting on a human, but it is waiting on a DECISION, and the repetition is the
+# pressure that gets that decision made.
+#
+# Otherwise one fm-crew-state.sh read serves the remaining absorb reasons at
+# once, from its one authoritative current-state line
+# ("state: <s> · source: <src> · <detail>"). Reading the state authoritatively
+# (not the status log) is what keeps run-step precedence: a crew that appended
+# paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
+# <state-dir> defaults to the caller's own STATE, exactly as window_to_task does.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
+crew_absorb_class() {  # <id> [state-dir]
+  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line crew_state src
   [ -n "$id" ] || { printf 'none'; return; }
+  if [ -n "$state" ] && fm_pr_merge_poll_armed "$state" "$id"; then
+    printf 'complete'
+    return
+  fi
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
+  crew_state=${line#state: }; crew_state=${crew_state%% *}
+  if [ "$crew_state" = paused ]; then printf 'paused'; return; fi
+  if [ "$crew_state" = "done" ]; then printf 'complete'; return; fi
+  if [ "$crew_state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
@@ -1252,16 +1287,24 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
-crew_is_provably_working() {  # <id>
-  [ "$(crew_absorb_class "$1")" = working ]
+# run. See crew_absorb_class for the exact complete/working/paused/none decision.
+crew_is_provably_working() {  # <id> [state-dir]
+  [ "$(crew_absorb_class "$1" "${2:-}")" = working ]
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of
 # escalating a possible wedge.
-crew_is_paused() {  # <id>
-  [ "$(crew_absorb_class "$1")" = paused ]
+crew_is_paused() {  # <id> [state-dir]
+  [ "$(crew_absorb_class "$1" "${2:-}")" = paused ]
+}
+
+# 0 if crew <id>'s work is finished and the next move belongs to the merge or
+# decision authority rather than the worker. The stale path absorbs such a crew
+# on the same long re-surface cadence a declared pause uses: both are bounded
+# waits with a known owner, and neither is a wedge.
+crew_is_complete() {  # <id> [state-dir]
+  [ "$(crew_absorb_class "$1" "${2:-}")" = complete ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

@@ -123,6 +123,32 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# Arm a REAL merge poll for <id> through the production path, so the tests below
+# assert against genuine .pr-poll / .pr-poll-registration artifacts rather than a
+# hand-rolled imitation that could drift from what fm-pr-check.sh actually
+# writes. The task meta deliberately records no worktree: that is what stops
+# fm-pr-check.sh reaching for the forge to read a head sha, so nothing here
+# touches the network. .last-check is stamped at the same time so the armed
+# poll's own check script cannot run during the stale paths under test.
+arm_merge_poll() {  # <state> <id>
+  local state=$1 id=$2
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pr-check.sh" "$id" \
+    "https://github.com/o/r/pull/859" >/dev/null 2>&1 \
+    || fail "could not arm the merge poll fixture for $id"
+  [ -s "$state/$id.pr-poll-registration" ] || fail "merge poll fixture left no registration for $id"
+  [ -s "$state/$id.pr-poll" ] || fail "merge poll fixture left no data sidecar for $id"
+  touch "$state/.last-check"
+}
+
+# Count the stale wake reasons a watcher printed across a multi-round fixture.
+# Read from its stdout rather than the durable queue, because those fixtures
+# drain and acknowledge between rounds and an acknowledged record is gone from
+# the queue by the time the count is taken.
+stale_reason_count() {  # <watcher-output-file>
+  [ -s "$1" ] || { printf '0'; return; }
+  grep -c '^stale: ' "$1" 2>/dev/null || true
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -388,6 +414,57 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# crew_absorb_class's fourth answer: complete - the work is FINISHED and the next
+# move belongs to the merge or decision authority, not the worker. Without it a
+# task waiting on the captain's merge is indistinguishable from a wedged one,
+# because every question the watcher can ask about the pane has the same answer
+# for both. The two sources are asserted separately because they answer in
+# different situations: the durable armed merge poll still answers for a worker
+# that exited, while the crew-state read covers a task that has no pull request
+# to poll at all.
+test_crew_absorb_class_complete_classifier() {
+  local dir fakebin state
+  dir=$(make_case absorb-class-complete); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+
+  # Source 2 first, with no poll armed: an authoritative done covers a local-only
+  # task whose captain approves a branch rather than a pull request.
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_absorb_class localonly "$state")" = complete ] || fail "an authoritative done was not classed complete"
+  crew_is_complete localonly "$state" || fail "crew_is_complete did not recognize a done verdict"
+  ! crew_is_provably_working localonly "$state" || fail "a complete crew was treated as provably working"
+  ! crew_is_paused localonly "$state" || fail "a complete crew was treated as paused"
+
+  # Source 1: a real armed merge poll, built through the production path.
+  printf 'window=firstmate:fm-merging\nkind=ship\n' > "$state/merging.meta"
+  arm_merge_poll "$state" merging
+  # It outranks a working run-step ON PURPOSE. no-mistakes keeps its ci step
+  # running for the whole merge-monitor phase, long after checks go green, so
+  # this exact reading persists for as long as the captain takes to merge.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  [ "$(crew_absorb_class merging "$state")" = complete ] \
+    || fail "an armed merge poll did not outrank a monitor-phase working read"
+  # And it still answers once the worker is gone, where every live read cannot.
+  FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  [ "$(crew_absorb_class merging "$state")" = complete ] \
+    || fail "an armed merge poll stopped answering for an exited worker"
+
+  # The boundaries. A task with no completion record keeps its old verdict, which
+  # is what preserves the escalation ladder for anything genuinely stuck.
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  [ "$(crew_absorb_class stuck "$state")" = none ] || fail "a stuck crew was classed complete"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  [ "$(crew_absorb_class stuck "$state")" = working ] || fail "an active run lost its working class"
+  # A run held at a gate is also waiting on a human, but it is waiting on a
+  # DECISION, and the repetition is the pressure that gets that decision made.
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s)'
+  [ "$(crew_absorb_class stuck "$state")" = none ] || fail "a parked gate was absorbed as complete"
+
+  unset FM_FAKE_CREW_STATE
+  pass "crew_absorb_class: complete from an armed merge poll or an authoritative done; stuck, working and parked unaffected"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -837,6 +914,145 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# --- completed task awaiting the captain's merge: absorbed, never wedged ------
+# Measured 2026-08-16 on a task whose pull request was green, mergeable and fully
+# pushed: it surfaced once and then escalated every FM_STALE_ESCALATE_SECS with a
+# climbing count, reaching demand-deep-inspection, for hours. The mechanism is
+# the same-hash branch of the non-terminal stale path: surface_nonterminal_stale
+# leaves no wedge timer, so every later poll on that unchanged hash re-enters
+# wedge_timer_check, which recreates the timer, escalates once past the
+# threshold, deletes it, and escalates again one count higher. Nothing
+# terminates it, and teardown is correctly refused before landing, so the task
+# has no quiet state it is allowed to reach.
+#
+# The CONTROL runs inside this same test on purpose. Before the fix its output
+# was byte-identical to the completed task's, which is the defect stated exactly:
+# supervision could not tell "finished, waiting on a human" from "wedged". It has
+# to stay loud, or the fix is just a disabled alarm.
+test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates() {
+  local dir state fakebin capture_file window key pane_hash sig pid round out
+  local ctl_dir ctl_state ctl_fakebin ctl_capture ctl_window ctl_key ctl_hash ctl_out
+
+  dir=$(make_case awaiting-merge); state="$dir/state"; fakebin="$dir/fakebin"
+  capture_file="$dir/pane.txt"; out="$dir/watch.out"
+  window="test:fm-merging"
+  printf 'idle - PR 859 green, waiting on the captain to merge\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merging.meta"
+  # The last line is NOT captain-relevant: this is the shape the incident had,
+  # and the shape that reaches the wedge ladder.
+  printf 'working: pushed and green, waiting on merge\n' > "$state/merging.status"
+  sig=$(seen_sig "$state/merging.status"); printf '%s' "$sig" > "$state/.seen-merging_status"
+  arm_merge_poll "$state" merging
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle - PR 859 green, waiting on the captain to merge")
+
+  # No live source can help here: the worker has stopped and its endpoint reads
+  # as gone. Only the durable armed poll knows the task is finished.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  round=1
+  while [ "$round" -le 4 ]; do
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    # Age any wedge timer past the threshold, exactly as real elapsed time does
+    # between cycles - so a timer that should not exist cannot hide behind a
+    # short test.
+    [ -e "$state/.stale-since-$key" ] && echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=99999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_live "$pid" 50; then reap "$pid"; else wait "$pid" || fail "awaiting-merge watcher round $round failed"; fi
+    # Drain and acknowledge between rounds, or a queued wake makes every later
+    # round exit on the re-arm resurface before it ever reaches the stale path.
+    ack_stopped_cycle "$state" || true
+    round=$((round + 1))
+  done
+  [ "$(stale_reason_count "$out")" -eq 0 ] \
+    || fail "a completed task awaiting merge raised $(stale_reason_count "$out") stale wakes: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a completed task awaiting merge was reported as a possible wedge"
+  [ -e "$state/.complete-$key" ] || fail "the complete absorb was not recorded for the awaiting-merge task"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a completed task awaiting merge was put on the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a completed task awaiting merge accumulated wedge escalations"
+
+  # CONTROL: the same pane, the same silence, the same absent live state - but no
+  # completion record, because this worker stopped mid-implementation.
+  ctl_dir=$(make_case genuinely-stuck); ctl_state="$ctl_dir/state"; ctl_fakebin="$ctl_dir/fakebin"
+  ctl_capture="$ctl_dir/pane.txt"; ctl_out="$ctl_dir/watch.out"
+  ctl_window="test:fm-stuck"
+  printf 'idle - PR 859 green, waiting on the captain to merge\n' > "$ctl_capture"
+  printf 'window=%s\nkind=ship\n' "$ctl_window" > "$ctl_state/stuck.meta"
+  printf 'working: implementing the parser\n' > "$ctl_state/stuck.status"
+  sig=$(seen_sig "$ctl_state/stuck.status"); printf '%s' "$sig" > "$ctl_state/.seen-stuck_status"
+  ctl_key=$(printf '%s' "$ctl_window" | tr ':/.' '___')
+  ctl_hash=$(hash_text "idle - PR 859 green, waiting on the captain to merge")
+  round=1
+  while [ "$round" -le 6 ]; do
+    printf '%s' "$ctl_hash" > "$ctl_state/.hash-$ctl_key"
+    printf '1\n' > "$ctl_state/.count-$ctl_key"
+    [ -e "$ctl_state/.stale-since-$ctl_key" ] && echo $(( $(date +%s) - 500 )) > "$ctl_state/.stale-since-$ctl_key"
+    PATH="$ctl_fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$ctl_window" FM_FAKE_TMUX_CAPTURE="$ctl_capture" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_STATE_OVERRIDE="$ctl_state" FM_CREW_STATE_BIN="$ctl_fakebin/fm-crew-state.sh" \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=99999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$ctl_out" &
+    pid=$!
+    if wait_live "$pid" 50; then reap "$pid"; else wait "$pid" || fail "control watcher round $round failed"; fi
+    ack_stopped_cycle "$ctl_state" || true
+    round=$((round + 1))
+  done
+  unset FM_FAKE_CREW_STATE
+  [ "$(stale_reason_count "$ctl_out")" -ge 3 ] \
+    || fail "a genuinely stuck task stopped alarming: $(cat "$ctl_out")"
+  grep -Fx "stale: $ctl_window" "$ctl_out" >/dev/null || fail "a genuinely stuck task lost its immediate stale surface"
+  grep -F "possible wedge" "$ctl_out" >/dev/null || fail "a genuinely stuck task lost its wedge escalation"
+  grep -F "escalation 2" "$ctl_out" >/dev/null || fail "a genuinely stuck task's escalation count stopped climbing"
+  [ ! -e "$ctl_state/.complete-$ctl_key" ] || fail "a genuinely stuck task was recorded as complete"
+  pass "a completed task awaiting merge is absorbed with no wedge, while an identical-looking stuck task still escalates"
+}
+
+# The bounded backstop. Absorbing a completed task must not make it invisible:
+# it re-surfaces once per FM_PAUSE_RESURFACE_SECS window, anchored on the status
+# file's own age so a redrawing pane cannot reset the cadence, and the reason
+# says plainly that this is a recheck rather than a wedge.
+test_complete_stale_resurfaces_on_the_bounded_cadence() {
+  local dir state fakebin capture_file window key pane_hash sig pid out statusf back
+  dir=$(make_case awaiting-merge-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  capture_file="$dir/pane.txt"; out="$dir/watch.out"
+  window="test:fm-merging"
+  printf 'idle - PR 859 green, waiting on the captain to merge\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merging.meta"
+  statusf="$state/merging.status"
+  printf 'working: pushed and green, waiting on merge\n' > "$statusf"
+  arm_merge_poll "$state" merging
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merging_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle - PR 859 green, waiting on the captain to merge")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a forgotten complete task never re-surfaced on the bounded cadence"
+  unset FM_FAKE_CREW_STATE
+  grep -F "stale: $window" "$out" >/dev/null || fail "the bounded recheck printed no stale wake"
+  grep -F "awaiting the merge or decision authority" "$out" >/dev/null \
+    || fail "the bounded recheck was not labeled a completion recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the bounded completion recheck was mislabeled a possible wedge"
+  [ -e "$state/.complete-resurfaced-$key" ] || fail "the completion re-surface throttle marker was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the bounded completion recheck used the wedge timer"
+  pass "a forgotten complete task re-surfaces once on the bounded cadence, labeled a recheck rather than a wedge"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -868,9 +1084,15 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
+    # The budget must outlast one whole watcher cycle, or every round is killed
+    # before the stale path runs and the bounded recheck below can never be
+    # observed - a machine-speed-dependent failure, since a loaded host needs
+    # several seconds to reach the first wake. Matches the more generous
+    # sibling budgets in this file rather than racing the watcher.
+    if wait_live "$pid" 100; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
     round=$((round + 1))
   done
+  [ -s "$state/.wake-queue" ] || fail "dead-agent declared pause queued no wake at all across six unchanged polls"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
@@ -1980,7 +2202,10 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
+  # No seeded .hash-*, so this budget has to cover the signal grace plus the two
+  # polls that establish a stable hash. A budget that only just covers them on an
+  # idle host fails on a loaded one, where the same wake simply arrives later.
+  wait_for_exit "$pid" 100 || fail "AFK paused changed pane did not hand off a stale wake"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
   [ ! -e "$state/.paused-$key" ] || fail "AFK watcher recorded normal-mode pause tracking instead of handing off"
@@ -1998,6 +2223,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_absorb_class_complete_classifier
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
@@ -2020,6 +2246,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates
+test_complete_stale_resurfaces_on_the_bounded_cadence
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

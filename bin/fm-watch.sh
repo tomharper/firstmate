@@ -20,8 +20,13 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          re-surface cadence, never as a wedge, and a COMPLETE task -
+#                          one whose work is finished and whose next move belongs to
+#                          the merge or decision authority - is absorbed on that same
+#                          bounded cadence, because an idle pane is the expected
+#                          outcome there and its armed merge poll already reports the
+#                          real transition. Only when no absorb class applies does the
+#                          log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -164,6 +169,8 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
+# A COMPLETE crew (handle_complete_stale) shares this cadence: both are bounded
+# waits whose owner is someone other than the worker.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -352,6 +359,57 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Absorb a stale pane whose task is COMPLETE - its work is finished and the next
+# move belongs to the merge or decision authority, not the worker
+# (crew_absorb_class's `complete`). An idle pane is the EXPECTED outcome there,
+# and for a task awaiting merge the armed merge poll is already the wake signal
+# that reports the actual transition, so the wedge ladder can only repeat. It
+# repeated for the whole of 2026-08-16 on a task whose pull request was green,
+# mergeable and pushed: surfaced once, then escalated every
+# STALE_ESCALATE_SECS with a climbing count, because teardown is correctly
+# refused before landing and the task therefore had no quiet state to reach.
+# Same bounded contract as handle_paused_stale, and cheap for the same reason -
+# it NEVER re-reads crew state, and the re-surface age is anchored on the status
+# file mtime rather than a per-hash marker, so a churny idle pane cannot keep
+# resetting the cadence. A .complete-resurfaced-<key> throttle marker records the
+# last re-surface epoch so, once past the window, it fires once per window rather
+# than every poll. Advances the stale suppressor to <hash> and flags the key
+# complete.
+handle_complete_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  : > "$STATE/.complete-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  statusf="$STATE/$task.status"
+  mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
+  rf="$STATE/.complete-resurfaced-$key"
+  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (complete ${age}s, awaiting the merge or decision authority - the worker has nothing left to do, rechecked on a long cadence not a wedge; confirm it is still unlanded)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    date +%s > "$rf"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (complete, awaiting merge/decision authority, age ${age}s): $win"
+}
+
+# Drop the complete CLASSIFICATION for a window whose pane became genuinely
+# active again, so the next stale sighting re-classifies from scratch. The
+# .complete-resurfaced-<key> throttle marker is deliberately NOT dropped here:
+# it anchors the bounded re-surface cadence, and clearing it on every pane
+# change would let a redrawing pane earn a fresh reminder per redraw - the exact
+# churn the status-file anchor above exists to prevent. At worst a task that
+# completes, takes new work, then completes again inherits one stale throttle
+# stamp and skips a single reminder.
+clear_complete_classification() {  # <window>
+  local win=$1 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  rm -f "$STATE/.complete-$key"
 }
 
 clear_pause_state() {  # <window>
@@ -1026,6 +1084,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    cmf="$STATE/.complete-$key"  # flag: this key's stale is using the bounded complete cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1067,23 +1126,42 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
-            fi
+            case "$(crew_absorb_class "$task" "$STATE")" in
+              working)
+                clear_complete_classification "$w"
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              complete)
+                # A finished task whose captain-relevant line is its own
+                # completion report. Firstmate saw that line through the signal
+                # path when it was written; re-surfacing the quiet pane behind
+                # it on every redraw only repeats what is already known.
+                handle_complete_stale "$w" "$task" "$h"
+                ;;
+              *)
+                clear_complete_classification "$w"
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                mark_surfaced "$STATE/$task.status"
+                wake "stale: $w"
+                ;;
+            esac
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          elif [ -e "$cmf" ] || fm_pr_merge_poll_armed "$STATE" "$task"; then
+            # Already classified complete, or durably complete no matter what
+            # this hash was classified as before (the armed-poll read is cheap
+            # and self-healing, so a task that finished AFTER its hash was first
+            # classified still reaches the bounded cadence rather than staying
+            # on whatever verdict it was given then).
+            handle_complete_stale "$w" "$task" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1098,6 +1176,14 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - complete: the work is finished and only the merge or decision
+          #     authority can advance it, so absorb on the same long cadence as a
+          #     declared pause. Without this the loop below never terminates: a
+          #     surfaced non-terminal stale leaves no wedge timer, so the SAME
+          #     unchanged hash re-enters wedge_timer_check on every later poll,
+          #     which recreates the timer, escalates once past the threshold,
+          #     deletes it, and escalates again one count higher - forever, on a
+          #     task that is healthy and has no quiet state available to it.
           #   - none: no running pipeline, no exact busy verdict, no declared pause.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -1108,14 +1194,21 @@ EOF
             case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$w"
+                clear_complete_classification "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
+                clear_complete_classification "$w"
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              complete)
+                clear_pause_tracking "$w"
+                handle_complete_stale "$w" "$task" "$h"
+                ;;
               *)
+                clear_complete_classification "$w"
                 surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
@@ -1128,8 +1221,12 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                complete) clear_pause_tracking "$w"
+                          handle_complete_stale "$w" "$task" "$h" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
+            elif [ -e "$cmf" ] || fm_pr_merge_poll_armed "$STATE" "$task"; then
+              handle_complete_stale "$w" "$task" "$h"
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
             fi
@@ -1138,8 +1235,13 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
-        # then route it through the same wedge timer instead of erasing it.
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+        # then route it through the same wedge timer instead of erasing it. A
+        # durably complete task is exempt from that bound for the same reason it
+        # is exempt from the stale ladder: no completed turn is owed by a worker
+        # with nothing left to do, and this bound was the second alarm loop the
+        # same task ran all day.
+        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" \
+          && ! fm_pr_merge_poll_armed "$STATE" "$task"; then
           wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
         else
           rm -f "$ssf" "$ewf"
@@ -1151,7 +1253,8 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" \
+        && ! fm_pr_merge_poll_armed "$STATE" "$task"; then
         wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
       else
         rm -f "$ssf" "$ewf"
