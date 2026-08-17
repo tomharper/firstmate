@@ -1228,8 +1228,17 @@ signal_reason_is_actionable() {  # <file> ...
 #   complete - the crew's work is FINISHED and no worker action can advance it:
 #              the next move belongs to whoever holds merge or decision
 #              authority. An idle pane is the expected outcome here, not a
-#              symptom, so supervision owes this a bounded recheck rather than a
-#              wedge escalation;
+#              symptom, so supervision owes it something other than the wedge
+#              ladder. WHICH thing depends on whether the task has already
+#              spoken, and the watcher owns that split rather than this
+#              classifier: a complete crew whose status log ends on a
+#              NON-captain-relevant line takes the bounded recheck cadence a
+#              declared pause uses, because nothing captain-relevant was ever
+#              surfaced for it and the recheck is the only thing that can mention
+#              it again; a complete crew whose log already ends captain-relevant
+#              is absorbed once and never re-surfaced, because that line reached
+#              its reader through the signal path when it was written and
+#              repeating it would add a wake to the commonest healthy shape;
 #   working  - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #              pane; the crew is legitimately mid-work on a static-looking pane
 #              (e.g. waiting on CI);

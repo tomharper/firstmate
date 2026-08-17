@@ -1904,6 +1904,103 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
 }
 
+# The busy-turn-age bound's completion exemption, in BOTH directions, because
+# this was the third raw read of the durable record to bypass the classifier's
+# precedence and the only one that had no test at all.
+#
+# A busy pane past the bound is the hung-foreground-call case, and the record
+# says nothing about what a LIVE worker is doing now. So the exemption is only
+# ever the suppression owner's answer: an armed poll whose crew-state reports
+# failed keeps the full ladder, exactly as the stale path already promises,
+# while an armed poll with no live reading left behind it stays exempt.
+test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-turn-age-failed-run); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-failed"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-failed.meta"
+  record_pi_busy "$state" busy-failed
+  printf 'working: pushed and green, waiting on merge\n' > "$state/busy-failed.status"
+  sig=$(seen_sig "$state/busy-failed.status"); printf '%s' "$sig" > "$state/.seen-busy-failed_status"
+  arm_merge_poll "$state" busy-failed
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-failed.meta"
+
+  # Phase A: past the bound, the follow-up run has FAILED, so the armed poll must
+  # not exempt it - the wedge timer starts.
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed at test'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE
+    fail "a failed run behind an armed poll escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "an armed merge poll exempted a FAILED run from the busy-turn-age bound"; }
+  [ ! -e "$state/.complete-$key" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a failed run behind an armed poll was recorded as complete"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional failed-run phase-A stop"
+
+  # Phase B: backdate the timer past the threshold; the ladder is intact.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { unset FM_FAKE_CREW_STATE; fail "a failed run behind an armed poll never wedge-escalated past the turn-age bound"; }
+  unset FM_FAKE_CREW_STATE
+  grep -F "stale: $window" "$out" >/dev/null || fail "the failed run's busy turn-age escalation printed no stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the failed run's busy turn-age escalation did not flag a possible wedge"
+  pass "an armed merge poll never exempts a failed follow-up run from the busy-turn-age bound"
+}
+
+test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-turn-age-complete); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-complete"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-complete.meta"
+  record_pi_busy "$state" busy-complete
+  printf 'working: pushed and green, waiting on merge\n' > "$state/busy-complete.status"
+  sig=$(seen_sig "$state/busy-complete.status"); printf '%s' "$sig" > "$state/.seen-busy-complete_status"
+  arm_merge_poll "$state" busy-complete
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-complete.meta"
+
+  # No live reading survives the worker's exit, so the durable record is the
+  # whole answer and the bound has nothing to bound: no completed turn is owed by
+  # a worker with nothing left to do.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE
+    fail "a durably complete task was wedge-escalated by the busy-turn-age bound: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete task was put on the wedge timer by the busy-turn-age bound"; }
+  [ ! -s "$out" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete busy pane printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a durably complete task stays exempt from the busy-turn-age bound"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2419,6 +2516,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll
+test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates
