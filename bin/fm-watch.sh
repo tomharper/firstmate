@@ -169,8 +169,11 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
-# A COMPLETE crew (handle_complete_stale) shares this cadence: both are bounded
-# waits whose owner is someone other than the worker.
+# A COMPLETE crew whose status log is NOT captain-relevant (handle_complete_stale)
+# shares this cadence: both are bounded waits whose owner is someone other than
+# the worker, and neither ever announced itself. A complete crew whose log DOES
+# end captain-relevant already announced itself through the signal path and is
+# absorbed with no re-surface at all (handle_complete_stale_quiet).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -353,8 +356,12 @@ busy_turn_over_age() {  # <task>
 # surfaced once, then escalated every STALE_ESCALATE_SECS with a climbing count,
 # because teardown is correctly refused before landing and the task therefore had
 # no quiet state it was allowed to reach.
-handle_bounded_stale() {  # <paused|complete> <window> <task> <hash>
-  local kind=$1 win=$2 task=$3 h=$4 key statusf mtime age flag rf rf_age reason
+# <resurface> is 1 (the default, and what a declared pause always uses) for a
+# state nobody has been told about, and 0 for one that already reached its reader
+# through another path; see handle_complete_stale_quiet for the only 0 caller and
+# the argument for it.
+handle_bounded_stale() {  # <paused|complete> <window> <task> <hash> [resurface]
+  local kind=$1 win=$2 task=$3 h=$4 resurface=${5:-1} key statusf mtime age flag rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   case "$kind" in
     paused)   flag="$STATE/.paused-$key";   rf="$STATE/.paused-resurfaced-$key" ;;
@@ -362,14 +369,23 @@ handle_bounded_stale() {  # <paused|complete> <window> <task> <hash>
     *) return 0 ;;
   esac
   printf '%s' "$h" > "$STATE/.stale-$key"
-  : > "$flag"
+  # The complete flag records WHICH hash the classifier agreed about, never a
+  # standalone verdict: complete_recheck_or_wedge re-reads the durable record on
+  # every poll and only uses this to know it may skip the costly crew-state call
+  # for this same hash. A pause flag stays a bare presence marker, as its own
+  # reconciliation (pause_state_class) already re-reads live state.
+  case "$kind" in
+    complete) printf '%s' "$h" > "$flag" ;;
+    *)        : > "$flag" ;;
+  esac
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+  if [ "$resurface" -eq 1 ] \
+    && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     case "$kind" in
       paused)
         reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
@@ -393,7 +409,65 @@ handle_paused_stale() {  # <window> <task> <hash>
 }
 
 handle_complete_stale() {  # <window> <task> <hash>
-  handle_bounded_stale complete "$@"
+  handle_bounded_stale complete "$1" "$2" "$3" 1
+}
+
+# The same absorb for a complete task whose status log ALREADY ends on a
+# captain-relevant line, with the bounded re-surface switched off entirely.
+#
+# THE REASON, because a net increase in wakes on the commonest healthy shape
+# would have defeated this change's whole purpose. That "done:" line surfaced
+# through the signal path the moment the crew wrote it, so firstmate has been
+# told. Re-surfacing the quiet pane behind it once an hour re-reports a fact
+# already delivered - an alarm on healthy state, which is exactly what teaches a
+# reader to dismiss the channel and is the harm this change exists to undo. It
+# cannot rot invisibly either: the armed merge poll is the real wake signal for
+# the merge itself, and the backlog, the heartbeat fleet scan and the
+# session-start digest all still carry the task.
+# The NON-terminal shape keeps the bounded cadence, and must: nothing
+# captain-relevant was ever surfaced for it, so a bounded backstop is the only
+# thing that can ever mention it again.
+handle_complete_stale_quiet() {  # <window> <task> <hash>
+  handle_bounded_stale complete "$1" "$2" "$3" 0
+}
+
+# THE ONE OWNER of the "an armed merge poll disagrees with this hash's wedge
+# timer" contract, and the only route in this file from a raw poll read to the
+# complete absorb. Every same-hash branch that used to consult the poll goes
+# through here, so no path can absorb a task as complete without
+# crew_absorb_class having agreed - which is what keeps the classifier's
+# precedence (a parked, blocked or FAILED run outranks the durable record) from
+# being bypassed one path down. Silencing a failed run behind a completion
+# record would be precisely the suppressed-real-alarm failure this whole change
+# was written to prevent.
+#
+# The durable record is re-read on EVERY call: it is two small private file
+# reads, and it is what makes a retired poll (merge landed, sidecars removed)
+# fall straight back to the wedge ladder instead of absorbing forever on a
+# completion that no longer exists.
+# The expensive read is the bounded one. crew_absorb_class may make a no-mistakes
+# call, so it runs at most once per key until something clears the recheck
+# marker, and not at all while .complete-<key> already names THIS hash. A
+# persistent disagreement therefore falls to the wedge timer rather than becoming
+# a per-poll crew-state call - the ambiguous direction resolving toward still
+# alarming, as it must.
+complete_recheck_or_wedge() {  # <window> <task> <hash> <since-file> <triage-label> <escalation-file> <resurface>
+  local win=$1 task=$2 h=$3 since_file=$4 label=$5 escalation_file=$6 resurface=$7 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  if fm_pr_merge_poll_armed "$STATE" "$task"; then
+    if [ "$(cat "$STATE/.complete-$key" 2>/dev/null || true)" = "$h" ]; then
+      handle_bounded_stale complete "$win" "$task" "$h" "$resurface"
+      return
+    fi
+    if [ ! -e "$STATE/.complete-recheck-$key" ]; then
+      : > "$STATE/.complete-recheck-$key"
+      if [ "$(crew_absorb_class "$task" "$STATE")" = complete ]; then
+        handle_bounded_stale complete "$win" "$task" "$h" "$resurface"
+        return
+      fi
+    fi
+  fi
+  wedge_timer_check "$win" "$since_file" "$label" "$escalation_file"
 }
 
 # Drop the complete CLASSIFICATION for a window whose pane became genuinely
@@ -425,6 +499,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
+  clear_complete_classification "$win"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
@@ -1083,7 +1158,6 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
-    cmf="$STATE/.complete-$key"  # flag: this key's stale is using the bounded complete cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1135,9 +1209,13 @@ EOF
               complete)
                 # A finished task whose captain-relevant line is its own
                 # completion report. Firstmate saw that line through the signal
-                # path when it was written; re-surfacing the quiet pane behind
-                # it on every redraw only repeats what is already known.
-                handle_complete_stale "$w" "$task" "$h"
+                # path when it was written, so this absorbs SILENTLY: record the
+                # classification, clear the wedge timer, and never re-surface.
+                # Re-surfacing the quiet pane behind an already-delivered report
+                # would be a net INCREASE in wakes on the commonest healthy
+                # awaiting-merge shape, which would have defeated this change's
+                # own purpose.
+                handle_complete_stale_quiet "$w" "$task" "$h"
                 ;;
               *)
                 clear_complete_classification "$w"
@@ -1158,34 +1236,22 @@ EOF
             # working"; a durable completion record says the worker is finished.
             # When BOTH are present they disagree, because the poll can be armed
             # after the classification was made, and that disagreement is the one
-            # case worth paying the authoritative read for. Re-read once and
-            # route on the answer. It cannot silence a working crew: the
-            # classifier's own precedence keeps working and parked ahead of the
-            # poll. The recheck marker bounds it to one read per hash, so a
-            # persistent disagreement cannot turn into a per-poll crew-state
-            # call, and handle_complete_stale clears the timer when it wins.
-            if [ ! -e "$STATE/.complete-recheck-$key" ] \
-              && fm_pr_merge_poll_armed "$STATE" "$task"; then
-              : > "$STATE/.complete-recheck-$key"
-              if [ "$(crew_absorb_class "$task" "$STATE")" = complete ]; then
-                handle_complete_stale "$w" "$task" "$h"
-              else
-                wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
-              fi
-            else
-              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
-            fi
-          elif [ -e "$cmf" ] || fm_pr_merge_poll_armed "$STATE" "$task"; then
-            # Already classified complete, or durably complete no matter what
-            # this hash was classified as before (the armed-poll read is cheap
-            # and self-healing, so a task that finished AFTER its hash was first
-            # classified still reaches the bounded cadence rather than staying
-            # on whatever verdict it was given then).
-            handle_complete_stale "$w" "$task" "$h"
+            # case worth paying the authoritative read for. Its single owner is
+            # complete_recheck_or_wedge, which re-reads the classifier rather
+            # than trusting the poll: working, parked, blocked and failed all
+            # still win, so this can never silence live work or a real failure.
+            # Absorbing here is quiet, for the same reason the first-sight
+            # branch above is quiet - the captain-relevant line already spoke.
+            complete_recheck_or_wedge "$w" "$task" "$h" "$ssf" \
+              "stale (overridden terminal status)" "$ewf" 0
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
+          # unmodified terminal-status behavior). A complete task lands here
+          # too, once absorbed, and stays silent: its own "done:" line was
+          # delivered through the signal path, the armed merge poll is the real
+          # wake signal for the merge, and the backlog, the heartbeat fleet scan
+          # and the session-start digest all still carry it.
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
@@ -1214,7 +1280,6 @@ EOF
             case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$w"
-                clear_complete_classification "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1245,31 +1310,21 @@ EOF
                           handle_complete_stale "$w" "$task" "$h" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
-            elif [ -e "$cmf" ]; then
-              # Already classified complete for this hash.
-              handle_complete_stale "$w" "$task" "$h"
-            elif [ -e "$ssf" ]; then
-              # Same disagreement window as the terminal branch above: a running
-              # timer says this hash was classified working (or was aged by an
-              # earlier pass here), while an armed poll says the worker is
-              # finished. Re-read once, bounded by the recheck marker, and let
-              # the classifier's own precedence decide - working and parked
-              # still win over the poll, so this can never silence live work.
-              if [ ! -e "$STATE/.complete-recheck-$key" ] \
-                && fm_pr_merge_poll_armed "$STATE" "$task"; then
-                : > "$STATE/.complete-recheck-$key"
-                if [ "$(crew_absorb_class "$task" "$STATE")" = complete ]; then
-                  handle_complete_stale "$w" "$task" "$h"
-                else
-                  wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
-                fi
-              else
-                wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
-              fi
-            elif fm_pr_merge_poll_armed "$STATE" "$task"; then
-              handle_complete_stale "$w" "$task" "$h"
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              # Every remaining same-hash outcome - already classified complete,
+              # a running wedge timer that an armed poll now disagrees with, and
+              # the plain no-timer repeat that used to fall straight through to
+              # the wedge ladder - is decided by the one owner of that contract.
+              # Routing them all through it is what stops an armed poll being
+              # read raw: a task whose FOLLOW-UP run has failed reports failed
+              # from crew-state and keeps its full escalation ladder, rather than
+              # being absorbed on an hourly cadence by a completion record that
+              # says nothing about the new run.
+              # This shape DOES keep the bounded re-surface: nothing
+              # captain-relevant was ever surfaced for it, so the backstop is the
+              # only thing that can mention it again.
+              complete_recheck_or_wedge "$w" "$task" "$h" "$ssf" \
+                "non-terminal stale" "$ewf" 1
             fi
           fi
         fi
