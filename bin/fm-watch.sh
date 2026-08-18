@@ -305,8 +305,12 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+# <suppress-task> and <suppress-hash> are supplied only by callers whose
+# suppression question has to be answered HERE rather than before the timer
+# starts; see busy_turn_wedge_due for the one such caller and why. Omitted, this
+# behaves exactly as it always has.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> [suppress-task] [suppress-hash]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 stask=${5:-} shash=${6:-} since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -316,6 +320,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if [ -n "$stask" ] && may_suppress_alarm "$win" "$stask" "$shash"; then
+          rm -f "$since_file" "$escalation_file"
+          triage_log "absorbed $label at the escalation point (complete, awaiting merge/decision authority): $win"
+          return
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -347,16 +356,43 @@ busy_turn_over_age() {  # <task>
 # The busy-pane turn-age bound as ONE predicate, because it is stated twice - for
 # a repeated pane hash and for a changed one - and a rule split across two copies
 # is exactly how a raw record read survived a fix round. 0 when a busy pane past
-# the bound owes the wedge ladder.
-# The completion exemption lives here and only as may_suppress_alarm's answer: no
-# completed turn is owed by a worker with nothing left to do, but a busy pane
-# whose live state still reads working, parked, blocked or failed is not such a
-# worker, so it keeps the bound and escalates.
-busy_turn_wedge_due() {  # <window> <task> <hash> <busy-now>
-  local win=$1 task=$2 h=$3 busy=$4
+# the bound owes the wedge TIMER.
+#
+# It does NOT decide the completion exemption, and that separation is the point.
+# This path is reached on every poll, and a busy pane that redraws (a ticking
+# elapsed footer) presents a new hash every time, so asking the suppression owner
+# here put its authoritative crew_absorb_class read - a bin/fm-crew-state.sh
+# subprocess that may make bounded no-mistakes calls - on the per-poll path for
+# that one shape, against a 15s poll on a loop that walks every window serially.
+# bin/fm-classify-lib.sh states the opposite contract for its own caller: run it
+# on first sighting, never on every wake.
+#
+# So the read is bound to the DECISION POINTS instead of to the polls. The timer
+# advances silently here, and wedge_timer_check asks the owner at the one moment
+# the answer can change an outcome - just before it would emit. On every other
+# poll the outcome is silence either way, so skipping the question cannot hide an
+# alarm, and the answer that does decide is always computed fresh at the instant
+# it decides. That restores the bound the old one-shot marker was crudely
+# approximating, at the granularity that actually matters: at most one read per
+# escalation window rather than one per poll.
+#
+# Two cheaper-looking shapes were rejected on the safety test, and the reasons
+# belong here because they are why this looks the way it does. Bounding the read
+# per WINDOW rather than per hash reintroduces the defect that a redrawing pane
+# can never re-agree, so its exemption evaporates after one redraw. Caching the
+# classifier's answer behind a freshness window is bounded and cheap, but a
+# cached `complete` up to one interval stale SUPPRESSES an alarm for a task that
+# has just stopped being complete, and no cheap invalidation closes it: a
+# complete task handed NEW work goes busy at once, turn-ended only advances when
+# a turn ENDS, and sparse status means the log may never change - so a crew that
+# HANGS on that new work leaves no invalidation trace at all, and the cached
+# answer would silence exactly the hang this bound exists to catch. Suppression
+# on stale evidence is not an acceptable trade under this change's governing
+# rule; nothing here is cached.
+busy_turn_wedge_due() {  # <task> <busy-now>
+  local task=$1 busy=$2
   [ "$busy" -eq 0 ] || return 1
-  busy_turn_over_age "$task" || return 1
-  ! may_suppress_alarm "$win" "$task" "$h"
+  busy_turn_over_age "$task"
 }
 
 # The ONE bounded-cadence absorb, shared by the two idle states that are not
@@ -500,10 +536,12 @@ handle_complete_stale_quiet() {  # <window> <task> <hash>
 # .complete-<key> already names THIS hash. Both markers key on the same (window,
 # hash) pair deliberately: the recheck marker bounds exactly the read whose
 # verdict the agreement marker records, so a persistent disagreement on one hash
-# stops being paid for and falls to the alarm rather than becoming a per-poll
-# crew-state call, while a pane that redraws into a genuinely new hash gets the
-# one fresh read that hash has never had. A recheck bounded per window instead
-# would answer a hash it never actually classified.
+# falls to the alarm without being paid for again, while a pane that redraws into
+# a genuinely new hash gets the one fresh read that hash has never had. A recheck
+# bounded per window instead would answer a hash it never actually classified.
+# That per-hash bound is not by itself enough for a pane that redraws every poll,
+# where every hash is new; callers on that path bound the question a second way,
+# by asking it only where it decides something. See busy_turn_wedge_due.
 # <class> is the verdict the caller already read on THIS poll, passed only so the
 # same read is not paid for twice. It is held to the identical bar: it must say
 # complete, and the armed record is still required.
@@ -1433,8 +1471,8 @@ EOF
         # nothing left to do (this bound was the second alarm loop the same task
         # ran all day), but a busy pane whose live state still reads working,
         # parked, blocked or failed keeps the bound and escalates.
-        if busy_turn_wedge_due "$w" "$task" "$h" "$busy_now"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        if busy_turn_wedge_due "$task" "$busy_now"; then
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$task" "$h"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1445,8 +1483,8 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      if busy_turn_wedge_due "$w" "$task" "$h" "$busy_now"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+      if busy_turn_wedge_due "$task" "$busy_now"; then
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$task" "$h"
       else
         rm -f "$ssf" "$ewf"
       fi

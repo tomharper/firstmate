@@ -1982,6 +1982,10 @@ test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task() {
   # No live reading survives the worker's exit, so the durable record is the
   # whole answer and the bound has nothing to bound: no completed turn is owed by
   # a worker with nothing left to do.
+  # The wedge timer advances silently on the polls before an escalation is due -
+  # on those polls the outcome is silence either way, so the authoritative read
+  # is not paid. What the exemption owes is that no escalation ever FIRES, which
+  # is decided at the moment the timer comes due, so that is what is asserted.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -1992,10 +1996,31 @@ test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task() {
     reap "$pid"; unset FM_FAKE_CREW_STATE
     fail "a durably complete task was wedge-escalated by the busy-turn-age bound: $(cat "$out")"
   fi
-  [ ! -e "$state/.stale-since-$key" ] \
-    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete task was put on the wedge timer by the busy-turn-age bound"; }
   [ ! -s "$out" ] \
     || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete busy pane printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+
+  # Bring the timer due: this is the poll where an unexempt task escalates.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE
+    fail "a durably complete task escalated at the busy-turn-age decision point: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete busy pane woke at the escalation point: $(cat "$out")"; }
+  grep -F "at the escalation point" "$state/.watch-triage.log" >/dev/null 2>&1 \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "the exemption was never decided at the escalation point"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a durably complete task accumulated a wedge escalation"; }
+  [ "$(cat "$state/.complete-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "the completion agreement was not recorded at the escalation point"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a durably complete task stays exempt from the busy-turn-age bound"
@@ -2082,10 +2107,15 @@ test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/busy-tick-done.meta"
 
+  # Every round presents a NEVER-BEFORE-SEEN hash and a timer that is already
+  # due, so each one reaches the escalation decision point on a fresh hash -
+  # the exact sequence that lost the exemption when the agreement and its
+  # recheck bound keyed on different things.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
   n=1
   while [ "$n" -le 3 ]; do
     printf 'Working... (%s.4s)' "$(( 3600 + n ))" > "$capture_file"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -2096,10 +2126,10 @@ test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash() {
       reap "$pid"; unset FM_FAKE_CREW_STATE
       fail "a durably complete busy pane lost its exemption on redraw $n: $(cat "$out")"
     fi
-    [ ! -e "$state/.stale-since-$key" ] \
-      || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n put a durably complete busy pane on the wedge timer"; }
     [ ! -s "$out" ] \
       || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n woke on a durably complete busy pane: $(cat "$out")"; }
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n accumulated a wedge escalation on a durably complete busy pane"; }
     recorded=$(cat "$state/.complete-$key" 2>/dev/null || true)
     [ "$recorded" = "$(hash_text "Working... ($(( 3600 + n )).4s)")" ] \
       || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n did not re-record the completion agreement for the new hash"; }
@@ -2113,6 +2143,89 @@ test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash() {
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "a durably complete busy pane accumulated wedge escalations across redraws"
   pass "a durably complete busy pane keeps its exemption across every pane redraw, not just the first"
+}
+
+# The cost property, measured rather than claimed, through the same
+# FM_CREW_STATE_BIN seam the rest of this suite uses. crew_absorb_class shells
+# out to bin/fm-crew-state.sh, which may make bounded no-mistakes subcalls; on a
+# pane that redraws every poll every hash is new, so binding that read to the
+# hash alone would put it on the per-poll path. It is bound to the escalation
+# decision points instead: silent polls pay nothing, and the one poll that
+# decides something pays exactly once, with an answer computed at the instant it
+# decides rather than cached.
+test_busy_turn_completion_read_is_paid_only_when_an_escalation_is_due() {
+  local dir state fakebin out capture_file window key pid n calls
+  dir=$(make_case busy-turn-read-cost); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-cost"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-cost.meta"
+  record_pi_busy "$state" busy-cost
+  printf 'working: pushed and green, waiting on merge\n' > "$state/busy-cost.status"
+  printf '%s' "$(seen_sig "$state/busy-cost.status")" > "$state/.seen-busy-cost_status"
+  arm_merge_poll "$state" busy-cost
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/busy-cost.meta"
+
+  # A counting stand-in for the authoritative reader: one line per invocation.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s
+' "${1:-}" >> "$FM_CREW_STATE_CALL_LOG"
+printf '%s
+' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_CREW_STATE_CALL_LOG="$dir/crew-state.calls"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+
+  # Three redraws with the escalation threshold far out of reach: no poll can
+  # decide anything, so none may pay for the authoritative read.
+  n=1
+  while [ "$n" -le 3 ]; do
+    printf 'Working... (%s.4s)' "$(( 3600 + n ))" > "$capture_file"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"; unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG
+      fail "the cost fixture escalated before its threshold on redraw $n: $(cat "$out")"
+    fi
+    reap "$pid"
+    ack_stopped_cycle "$state" || true
+    n=$((n + 1))
+  done
+  calls=$(wc -l < "$FM_CREW_STATE_CALL_LOG" 2>/dev/null || echo 0)
+  calls=${calls//[[:space:]]/}
+  [ "${calls:-0}" -eq 0 ] \
+    || { unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG; fail "the authoritative completion read was paid on $calls silent poll(s), which must cost nothing"; }
+
+  # Now bring the timer due. This poll DOES decide something, so it must pay -
+  # exactly once, and the answer decides it rather than a cached one.
+  printf 'Working... (3700.9s)' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG
+    fail "the cost fixture escalated at its decision point despite a durable completion record: $(cat "$out")"
+  fi
+  reap "$pid"
+  calls=$(wc -l < "$FM_CREW_STATE_CALL_LOG" 2>/dev/null || echo 0)
+  calls=${calls//[[:space:]]/}
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG
+  [ "${calls:-0}" -ge 1 ] \
+    || fail "the escalation decision point did not pay for a fresh authoritative read"
+  [ ! -s "$out" ] || fail "the cost fixture woke on a durably complete busy pane: $(cat "$out")"
+  pass "the authoritative completion read is paid only where an escalation is due, never per poll"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -2634,6 +2747,7 @@ test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll
 test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task
 test_busy_pane_changing_hash_reaches_demand_deep_inspection_without_a_completion_record
 test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash
+test_busy_turn_completion_read_is_paid_only_when_an_escalation_is_due
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates

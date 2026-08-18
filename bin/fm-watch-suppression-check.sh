@@ -82,22 +82,41 @@ def fail(message: str) -> None:
     raise CheckError(message)
 
 
+def allowance_covers(line: str, match: re.Match) -> bool:
+    """True when THIS occurrence is itself one of the named check-sweep call sites.
+
+    Span-scoped, never line-scoped. An allowance that asked only whether some
+    allowed name appears somewhere on the line would excuse a real record read
+    for sharing a line with a trailing comment or an unrelated string - a guard
+    against a rule being broken a fourth time, defeatable by writing a comment
+    next to the break. Each occurrence is judged on its own.
+    """
+    for allowed in ALLOWED:
+        index = line.find(allowed)
+        while index >= 0:
+            if index <= match.start() and match.end() <= index + len(allowed):
+                return True
+            index = line.find(allowed, index + 1)
+    return False
+
+
+def code_matches(line: str):
+    """Every banned occurrence <line> reads as code, skipping commented ones."""
+    return [m for m in BANNED_RE.finditer(line) if "#" not in line[: m.start()]]
+
+
 def banned_read(line: str) -> str:
     """The banned spelling <line> reads as code, or None when it reads none."""
-    for match in BANNED_RE.finditer(line):
-        if "#" in line[: match.start()]:
-            continue
-        if any(allowed in line for allowed in ALLOWED):
+    for match in code_matches(line):
+        if allowance_covers(line, match):
             continue
         return match.group(0)
     return None
 
 
-def allowed_check_sweep(line: str) -> bool:
-    """True when <line> is a merge-poll check-sweep call rather than a record read."""
-    if BANNED_RE.search(line) is None:
-        return False
-    return any(allowed in line for allowed in ALLOWED)
+def allowed_check_sweep(line: str) -> int:
+    """How many of <line>'s banned occurrences the named allowance itself covers."""
+    return sum(1 for match in code_matches(line) if allowance_covers(line, match))
 
 
 def owner_span(lines: list[str], target: str) -> tuple[int, int]:
@@ -138,9 +157,7 @@ def validate(target_path: Path) -> tuple[int, int, int]:
             if banned_read(line) is not None:
                 inside += 1
             continue
-        if allowed_check_sweep(line):
-            swept += 1
-            continue
+        swept += allowed_check_sweep(line)
         spelling = banned_read(line)
         if spelling is None:
             continue
