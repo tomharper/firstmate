@@ -19,6 +19,10 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
+  # fm-classify-lib.sh sources this unconditionally for the merge-poll record
+  # behind its complete absorb; without it the fixture's source fails and prints
+  # into the stderr this suite asserts on.
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
   cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2

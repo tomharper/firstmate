@@ -421,6 +421,31 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_CHECK_IDENTITY=$check_identity
 }
 
+# 0 when <state> holds an ARMED merge poll for <id>: a registration that names
+# exactly this task and reconstructs its own stored identity, plus a sidecar
+# agreeing on the same canonical URL.
+# Firstmate arms that poll only after a worker reports its pull request green
+# and pushed, so an armed poll is the home's durable record that the task's work
+# is finished and its next transition - merge or close - arrives through the
+# poll rather than through the worker. That makes this the one statement of
+# "complete, waiting on the merge authority" that survives an idle worker, an
+# exited one, and a torn-down endpoint alike, which is exactly where a live
+# read of the crew can say nothing. bin/fm-classify-lib.sh's absorb
+# classification consumes it; see that file for what supervision does with it.
+# A pure read of two small private files: cheap enough for a per-poll caller,
+# and it clobbers the same FM_PR_* scratch globals as the parsers it delegates
+# to, so callers must not hold those across a call.
+fm_pr_merge_poll_armed() {  # <state> <id>
+  local state=$1 id=$2 reg_url
+  [ -n "$state" ] && [ -n "$id" ] || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_registration_parse "$state/$id.pr-poll-registration" || return 1
+  [ "$FM_PR_REG_ID" = "$id" ] || return 1
+  reg_url=$FM_PR_REG_URL
+  fm_pr_poll_data_parse "$state/$id.pr-poll" || return 1
+  [ "$FM_PR_DATA_URL" = "$reg_url" ]
+}
+
 fm_pr_poll_cleanup() {
   [ -z "$FM_PR_POLL_DATA_TMP" ] || rm -f -- "$FM_PR_POLL_DATA_TMP"
   [ -z "$FM_PR_POLL_CHECK_TMP" ] || rm -f -- "$FM_PR_POLL_CHECK_TMP"

@@ -155,6 +155,7 @@ family_for_basename() {
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
+    fm-watch-suppression-check.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -892,18 +893,24 @@ families_for_changed_path() {
     bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
-    bin/fm-classify-lib.sh)
+    bin/fm-classify-lib.sh|bin/fm-pr-lib.sh)
       # Owner of the status-line stamp contract, so its blast radius is every
       # suite whose script parses a status line through it, not the wake
       # families alone: fm-brief.sh and fm-crew-state.sh (pure-contract-unit),
       # fm-spawn.sh (backend-dispatch), the brief-scaffolded status-append
       # instruction (secondmate), fm-fleet-snapshot.sh (snapshot-bearings), and
       # the pending-reply suite that also covers fm-secondmate-report.sh.
+      # fm-pr-lib.sh shares that whole radius: fm-classify-lib.sh sources it
+      # unconditionally for the merge-poll record behind the complete absorb, so
+      # a change to the poll parsers can break supervision triage, not the forge
+      # alone - and pr-forge is added rather than substituted because the forge
+      # remains its other consumer.
       printf '%s\n' watcher-wake-lock
       printf '%s\n' pure-contract-unit
       printf '%s\n' backend-dispatch
       printf '%s\n' secondmate
       printf '%s\n' snapshot-bearings
+      printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-pending-reply.test.sh"
       ;;
     bin/fm-afk*)
