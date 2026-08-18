@@ -2246,10 +2246,16 @@ SH
   pass "the authoritative completion read is paid only where an escalation is due, never per poll"
 }
 
-# The away-mode contract, which the escalation-point read has to respect like
-# every other costly read in this file: while state/.afk exists the daemon owns
-# triage and this watcher is one-shot, so it neither pays for the authoritative
-# read nor makes a suppression decision the daemon is the one to make.
+# SUPPRESSION REQUIRES EVIDENCE, pinned in the direction that costs something.
+# This test asserts that a durably complete task DOES climb the ladder under away
+# mode, and that is INTENDED behaviour rather than a bug someone pinned by
+# accident. The reasoning, so a future reader does not "fix" it: a complete task
+# is silenced only because supervision knows it is finished and waiting on a
+# human, and that knowledge is the authoritative read. While state/.afk exists
+# the daemon owns triage and this watcher is one-shot, so it deliberately
+# declines to gather that evidence - and without the evidence there is no
+# suppression to assert. The alarm is therefore correct, and the counter below
+# proves the read really was skipped rather than merely ignored.
 test_afk_skips_the_busy_turn_suppression_read() {
   local dir state fakebin out capture_file window key pid calls
   dir=$(make_case busy-turn-afk); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2294,8 +2300,8 @@ SH
   [ ! -e "$state/.complete-$key" ] \
     || fail "away mode recorded a completion agreement the daemon owns"
   grep -F "possible wedge" "$out" >/dev/null \
-    || fail "away mode swallowed the busy-turn escalation instead of handing it to the daemon: $(cat "$out")"
-  pass "away mode neither pays for the busy-turn suppression read nor decides it"
+    || fail "away mode suppressed without the evidence that justifies it: $(cat "$out")"
+  pass "away mode gathers no completion evidence, so it suppresses nothing and the task alarms"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {

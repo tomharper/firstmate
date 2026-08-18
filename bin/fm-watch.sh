@@ -36,6 +36,19 @@
 #                          re-surfaced, because that line reached the captain through
 #                          the signal path when it was written and repeating it would
 #                          add a wake to the commonest healthy shape there is.
+#                          BOTH absorbs are CONDITIONAL ON THE AUTHORITATIVE READ, and
+#                          that condition is the rule rather than a caveat:
+#                          SUPPRESSION REQUIRES EVIDENCE. A complete task is silenced
+#                          because supervision KNOWS it is finished and waiting on a
+#                          human, and that knowledge comes from the classifier read.
+#                          Where the read is not paid, it is not known, and the task
+#                          alarms. Away mode is exactly that case: while state/.afk
+#                          exists the daemon owns triage and this watcher is one-shot,
+#                          so a complete task awaiting the captain's merge with a busy
+#                          over-age pane climbs the full wedge ladder there. That is
+#                          the correct outcome, not a gap - a suppression asserted
+#                          without the evidence that justifies it is the very defect
+#                          this whole class was added to remove.
 #                          Only when no absorb class applies does the
 #                          log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
@@ -524,11 +537,23 @@ handle_complete_stale_quiet() {  # <window> <task> <hash>
 # bin/fm-watch-suppression-check.sh, that fails when a raw read reappears
 # anywhere else in this file.
 #
+# SUPPRESSION REQUIRES EVIDENCE. That is the rule this owner exists to enforce,
+# and it decides every question of the form "may we skip the read just here".
 # Suppression requires BOTH, never either alone:
 #   - the durable record is ARMED for exactly this task, and
 #   - the classifier agrees the task is complete, either because this exact pane
 #     hash was already recorded as agreed or because a bounded authoritative
 #     crew_absorb_class read says complete now.
+# The corollary is load-bearing rather than incidental: WHERE THE READ IS NOT
+# PAID, NOTHING MAY BE SUPPRESSED. Away mode is the one place that bites. Under
+# afk the daemon owns triage and this watcher is one-shot, so it does not pay the
+# read, so it does not know the task is complete, so the task alarms - a complete
+# task awaiting the captain's merge with a busy over-age pane climbs the full
+# ladder while state/.afk exists. Both ways out were considered and rejected:
+# weakening away mode's no-costly-read contract trades a captain-facing guarantee
+# for tidiness, and suppressing on the durable record alone, without the
+# classifier, is the bypass shape this change has now found FIVE separate times
+# and closed each time. It does not become acceptable at a sixth site.
 # Everything else alarms: a retired poll, and every classifier answer of working,
 # parked, blocked, failed, paused or none. That is this change's governing rule
 # made mechanical - a false alarm costs attention, a suppressed real one cost 75
