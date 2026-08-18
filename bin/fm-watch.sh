@@ -22,10 +22,21 @@
 #                          external-wait pause is absorbed instead with its own long
 #                          re-surface cadence, never as a wedge, and a COMPLETE task -
 #                          one whose work is finished and whose next move belongs to
-#                          the merge or decision authority - is absorbed on that same
-#                          bounded cadence, because an idle pane is the expected
-#                          outcome there and its armed merge poll already reports the
-#                          real transition. Only when no absorb class applies does the
+#                          the merge or decision authority - is absorbed too, never as
+#                          a wedge, because an idle pane is the expected outcome there
+#                          and its armed merge poll already reports the real
+#                          transition. Which absorb a complete task gets depends on
+#                          whether it has already spoken. One whose status log ends
+#                          NON-captain-relevant takes the same bounded
+#                          FM_PAUSE_RESURFACE_SECS recheck the pause uses, because
+#                          nothing captain-relevant was ever surfaced for it and that
+#                          recheck is the only thing that can mention it again while
+#                          its state can still change without anyone acting. One whose
+#                          log already ends captain-relevant is absorbed ONCE and never
+#                          re-surfaced, because that line reached the captain through
+#                          the signal path when it was written and repeating it would
+#                          add a wake to the commonest healthy shape there is.
+#                          Only when no absorb class applies does the
 #                          log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -485,10 +496,14 @@ handle_complete_stale_quiet() {  # <window> <task> <hash>
 # to the wedge ladder instead of absorbing forever on a completion that no longer
 # exists.
 # The expensive read is the bounded one. crew_absorb_class may make a no-mistakes
-# call, so it runs at most once per key until something clears the recheck
-# marker, and not at all while .complete-<key> already names THIS hash. A
-# persistent disagreement therefore stops being paid for and falls to the alarm
-# rather than becoming a per-poll crew-state call.
+# call, so it runs at most once per DISTINCT pane hash, and not at all while
+# .complete-<key> already names THIS hash. Both markers key on the same (window,
+# hash) pair deliberately: the recheck marker bounds exactly the read whose
+# verdict the agreement marker records, so a persistent disagreement on one hash
+# stops being paid for and falls to the alarm rather than becoming a per-poll
+# crew-state call, while a pane that redraws into a genuinely new hash gets the
+# one fresh read that hash has never had. A recheck bounded per window instead
+# would answer a hash it never actually classified.
 # <class> is the verdict the caller already read on THIS poll, passed only so the
 # same read is not paid for twice. It is held to the identical bar: it must say
 # complete, and the armed record is still required.
@@ -507,8 +522,8 @@ may_suppress_alarm() {  # <window> <task> <hash> [class-already-read-this-poll]
   if [ "$(cat "$STATE/.complete-$key" 2>/dev/null || true)" = "$h" ]; then
     return 0
   fi
-  [ -e "$STATE/.complete-recheck-$key" ] && return 1
-  : > "$STATE/.complete-recheck-$key"
+  [ "$(cat "$STATE/.complete-recheck-$key" 2>/dev/null || true)" = "$h" ] && return 1
+  printf '%s' "$h" > "$STATE/.complete-recheck-$key"
   [ "$(crew_absorb_class "$task" "$STATE")" = complete ] || return 1
   printf '%s' "$h" > "$STATE/.complete-$key"
 }

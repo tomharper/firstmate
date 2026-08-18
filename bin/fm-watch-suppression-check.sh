@@ -14,6 +14,15 @@
 # obey it has to be enforced rather than restated, so this check fails when any
 # read of the record appears outside that owner.
 #
+# It bans the RECORD, not one name for it. The armed-poll predicate is only the
+# spelling those three bypasses happened to use; the same record is equally
+# reachable through the parsers that predicate wraps, or by reading its two
+# sidecar paths directly, and a fourth bypass written either of those ways would
+# otherwise pass silently. The merge-poll CHECK sweep is a different subsystem
+# that legitimately handles the same artifacts, so its entry points are an
+# explicit named allowance below rather than an implicit gap - an invisible
+# carve-out is how the busy-turn bypass survived three rounds.
+#
 # Structure only: it locates the owner and the reads, and never judges what the
 # owner does. Point --target at a copy to exercise the check itself.
 set -eu
@@ -24,11 +33,45 @@ exec python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 OWNER = "may_suppress_alarm"
-RECORD = "fm_pr_merge_poll_armed"
+
+# Every way bin/fm-watch.sh could reach the durable completion record. Written as
+# families rather than the three spellings already known to have bypassed the
+# owner, so a fourth spelling is banned before anyone invents it.
+BANNED = [
+    # The armed-poll predicate itself, and the spelling all three known bypasses used.
+    r"fm_pr_merge_poll_armed",
+    # Every lower-level poll accessor, including the two parsers that predicate
+    # wraps (fm_pr_poll_registration_parse, fm_pr_poll_data_parse).
+    r"fm_pr_poll_[a-z_]+",
+    # The record's own sidecar paths and any other textual reference to them:
+    # state/<id>.pr-poll and state/<id>.pr-poll-registration.
+    r"pr-poll",
+]
+BANNED_RE = re.compile("|".join(BANNED))
+
+# The merge-poll CHECK sweep. These handle the same artifacts and must keep
+# working untouched: they retire a landed poll and snapshot its bytes, which is
+# an authenticated-check concern, not a suppression decision. Named explicitly so
+# the allowance is reviewable rather than an accident of how the ban is spelled.
+ALLOWED = {
+    # Startup recovery of a retirement interrupted mid-sequence.
+    "fm_pr_poll_retirement_recover_all": "check sweep: recover interrupted retirements",
+    # Per-task retirement recovery after the receipt is published.
+    "fm_pr_poll_retirement_recover_one": "check sweep: finish one task's retirement",
+    # Publishes the retirement receipt that makes retirement retryable.
+    "fm_pr_poll_retirement_publish": "check sweep: publish the retirement receipt",
+    # Captures the poll bytes bound into that receipt before the check runs.
+    "fm_pr_poll_snapshot_capture": "check sweep: snapshot poll bytes for the receipt",
+    # The check script those entry points are handed.
+    "fm-pr-poll.sh": "check sweep: the poll check script path",
+    # The wake key the retirement notification is queued under.
+    "pr-poll-retirement": "check sweep: the retirement wake key",
+}
 
 
 class CheckError(Exception):
@@ -39,13 +82,22 @@ def fail(message: str) -> None:
     raise CheckError(message)
 
 
-def code_before(line: str, token: str) -> str:
-    """The part of <line> preceding <token>, or None when the token is prose."""
-    index = line.find(token)
-    if index < 0:
-        return None
-    head = line[:index]
-    return None if "#" in head else head
+def banned_read(line: str) -> str:
+    """The banned spelling <line> reads as code, or None when it reads none."""
+    for match in BANNED_RE.finditer(line):
+        if "#" in line[: match.start()]:
+            continue
+        if any(allowed in line for allowed in ALLOWED):
+            continue
+        return match.group(0)
+    return None
+
+
+def allowed_check_sweep(line: str) -> bool:
+    """True when <line> is a merge-poll check-sweep call rather than a record read."""
+    if BANNED_RE.search(line) is None:
+        return False
+    return any(allowed in line for allowed in ALLOWED)
 
 
 def owner_span(lines: list[str], target: str) -> tuple[int, int]:
@@ -70,7 +122,7 @@ def owner_span(lines: list[str], target: str) -> tuple[int, int]:
     fail(f"{target}:{start} {OWNER} has no closing brace at column 0")
 
 
-def validate(target_path: Path) -> tuple[int, int]:
+def validate(target_path: Path) -> tuple[int, int, int]:
     try:
         text = target_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -80,14 +132,20 @@ def validate(target_path: Path) -> tuple[int, int]:
     start, end = owner_span(lines, target)
 
     inside = 0
+    swept = 0
     for number, line in enumerate(lines, start=1):
-        if code_before(line, RECORD) is None:
-            continue
         if start <= number <= end:
-            inside += 1
+            if banned_read(line) is not None:
+                inside += 1
+            continue
+        if allowed_check_sweep(line):
+            swept += 1
+            continue
+        spelling = banned_read(line)
+        if spelling is None:
             continue
         fail(
-            f"{target}:{number} reads the durable merge-poll record ({RECORD}) "
+            f"{target}:{number} reads the durable merge-poll record ({spelling}) "
             f"outside {OWNER} (lines {start}-{end}): {line.strip()} - every "
             f"suppression decision must ask {OWNER}, which requires the "
             f"classifier to agree the task is complete, so a parked, blocked or "
@@ -96,9 +154,9 @@ def validate(target_path: Path) -> tuple[int, int]:
     if inside == 0:
         fail(
             f"{target}: {OWNER} never reads the durable merge-poll record "
-            f"({RECORD}), so this check would pass vacuously"
+            f"(none of {', '.join(BANNED)}), so this check would pass vacuously"
         )
-    return end - start + 1, inside
+    return end - start + 1, inside, swept
 
 
 def main() -> int:
@@ -109,13 +167,13 @@ def main() -> int:
     args = parser.parse_args()
     target = args.target if args.target.is_absolute() else Path.cwd() / args.target
     try:
-        owner_lines, reads = validate(target)
+        owner_lines, reads, swept = validate(target)
     except CheckError as exc:
         print(f"fm-watch-suppression-check: {exc}", file=sys.stderr)
         return 1
     print(
         f"fm-watch-suppression-check: ok owner={OWNER} owner_lines={owner_lines} "
-        f"record_reads={reads} target={target.name}"
+        f"record_reads={reads} check_sweep_allowed={swept} target={target.name}"
     )
     return 0
 

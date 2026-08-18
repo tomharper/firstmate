@@ -2001,6 +2001,120 @@ test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task() {
   pass "a durably complete task stays exempt from the busy-turn-age bound"
 }
 
+# The changing pane hash, which is the shape the busy exemption actually meets in
+# production: Pi's rendered elapsed-time footer ticks, so no two polls ever share
+# a hash and the busy-turn path never re-enters a first-sight branch that could
+# re-classify. Both directions are pinned here because the suppression owner's
+# agreement marker and its recheck bound must key on the SAME (window, hash)
+# pair - a recheck bounded per window instead answers a hash it never classified,
+# which silently ends the exemption after one redraw in one direction and would
+# hide a real wedge in the other.
+test_busy_pane_changing_hash_reaches_demand_deep_inspection_without_a_completion_record() {
+  local dir state fakebin out capture_file window key sig pid n
+  dir=$(make_case busy-changing-hash-demand); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-tick-stuck"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-tick-stuck.meta"
+  record_pi_busy "$state" busy-tick-stuck
+  printf 'working: still implementing the parser\n' > "$state/busy-tick-stuck.status"
+  sig=$(seen_sig "$state/busy-tick-stuck.status"); printf '%s' "$sig" > "$state/.seen-busy-tick-stuck_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/busy-tick-stuck.meta"
+  # No merge poll is armed: this crew is genuinely stuck, and no pane redraw may
+  # ever buy it an exemption. No .hash-<key> either, so every poll below takes
+  # the changed-hash branch, exactly as a ticking footer does.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "priming round for the changing-hash busy wedge escalated too early: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "a stuck changing-hash busy pane past the bound started no wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the changing-hash busy priming stop"
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    printf 'Working... (%s.4s)' "$(( 3600 + n ))" > "$capture_file"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "changing-hash busy wedge round $n did not escalate: $(cat "$out")"
+    grep -F "possible wedge" "$out" >/dev/null \
+      || fail "changing-hash busy wedge round $n did not flag a possible wedge: $(cat "$out")"
+    grep -F "escalation $n" "$out" >/dev/null \
+      || fail "changing-hash busy wedge round $n did not report escalation count $n: $(cat "$out")"
+    if [ "$n" -lt 3 ]; then
+      grep -F "demand-deep-inspection" "$out" >/dev/null \
+        && fail "changing-hash busy wedge round $n demanded deep inspection before the threshold: $(cat "$out")"
+    else
+      grep -F "demand-deep-inspection" "$out" >/dev/null \
+        || fail "changing-hash busy wedge round $n (threshold) did not demand deep inspection: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" || fail "could not acknowledge changing-hash busy wedge round $n"
+    n=$((n + 1))
+  done
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] \
+    || fail "the changing-hash busy escalation counter did not climb across redraws"
+  [ ! -e "$state/.complete-$key" ] \
+    || fail "a stuck task with no merge poll was recorded as complete"
+  [ ! -e "$state/.complete-recheck-$key" ] \
+    || fail "a stuck task with no merge poll paid for an authoritative completion recheck"
+  pass "a stuck busy pane whose hash changes every poll still climbs the full ladder to demand-deep-inspection"
+}
+
+test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash() {
+  local dir state fakebin out capture_file window key pid n recorded
+  dir=$(make_case busy-changing-hash-complete); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-tick-complete"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-tick-done.meta"
+  record_pi_busy "$state" busy-tick-done
+  printf 'working: pushed and green, waiting on merge\n' > "$state/busy-tick-done.status"
+  printf '%s' "$(seen_sig "$state/busy-tick-done.status")" > "$state/.seen-busy-tick-done_status"
+  arm_merge_poll "$state" busy-tick-done
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/busy-tick-done.meta"
+
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  n=1
+  while [ "$n" -le 3 ]; do
+    printf 'Working... (%s.4s)' "$(( 3600 + n ))" > "$capture_file"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"; unset FM_FAKE_CREW_STATE
+      fail "a durably complete busy pane lost its exemption on redraw $n: $(cat "$out")"
+    fi
+    [ ! -e "$state/.stale-since-$key" ] \
+      || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n put a durably complete busy pane on the wedge timer"; }
+    [ ! -s "$out" ] \
+      || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n woke on a durably complete busy pane: $(cat "$out")"; }
+    recorded=$(cat "$state/.complete-$key" 2>/dev/null || true)
+    [ "$recorded" = "$(hash_text "Working... ($(( 3600 + n )).4s)")" ] \
+      || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "redraw $n did not re-record the completion agreement for the new hash"; }
+    reap "$pid"
+    # Drain and acknowledge between rounds, or a queued wake makes the next round
+    # exit on the re-arm resurface before it ever reaches the busy-turn path.
+    ack_stopped_cycle "$state" || true
+    n=$((n + 1))
+  done
+  unset FM_FAKE_CREW_STATE
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a durably complete busy pane accumulated wedge escalations across redraws"
+  pass "a durably complete busy pane keeps its exemption across every pane redraw, not just the first"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2518,6 +2632,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll
 test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task
+test_busy_pane_changing_hash_reaches_demand_deep_inspection_without_a_completion_record
+test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates
