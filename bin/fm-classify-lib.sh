@@ -20,9 +20,10 @@
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, finished, or none of those. Callers run it ONLY on
-# no-verb signal handling
-# and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
+# no-verb signal handling, on first sighting of a stale hash, and at the
+# watcher's alarm-suppression points, bounded there to one read per pane hash -
+# never on every wake, so the per-wake triage stays cheap.
+# status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
