@@ -101,16 +101,22 @@ SH
 
 # The sharpest instance of the pattern this guard exists to stop: a guard built
 # so a rule cannot be broken a fourth time, which could itself be defeated by
-# naming an allowed call site anywhere on the same line. The allowance binds to
-# the matched occurrence, so neither a trailing comment nor an unrelated string
-# excuses a real record read beside it - and neither may quietly inflate the
-# allowance count either.
+# something else on the same line. Two escapes of that shape are pinned here.
+# The allowance binds to the matched occurrence, so neither a trailing comment nor
+# an unrelated string excuses a real record read beside it, and neither may
+# quietly inflate the allowance count. And there is no comment exemption at all,
+# so a `#` earlier in the line cannot hide a read behind it - which matters most
+# where the `#` is not a comment marker: `${1#state/}` is idiomatic prefix
+# stripping, and any rule for where code ends would have to get that right.
 test_an_allowed_name_sharing_the_line_does_not_excuse_a_record_read() {
   local copy line i=0 shape
   # shellcheck disable=SC2016 # literal source lines to inject, never expanded here.
   for shape in \
     'fm_pr_merge_poll_armed "$STATE" "$1" # mirrors the fm-pr-poll.sh sweep' \
-    'fm_pr_merge_poll_armed "$STATE" "$1" || triage_log "pr-poll-retirement not armed"'
+    'fm_pr_merge_poll_armed "$STATE" "$1" || triage_log "pr-poll-retirement not armed"' \
+    'local id=${1#state/}; fm_pr_merge_poll_armed "$STATE" "$id"' \
+    'local n="#1"; fm_pr_merge_poll_armed "$STATE" "$1"' \
+    '# a commented-out fm_pr_merge_poll_armed "$STATE" "$1" still names the record'
   do
     i=$((i + 1))
     copy="$TMP_ROOT/fm-watch-sameline-$i.sh"
@@ -126,7 +132,7 @@ test_an_allowed_name_sharing_the_line_does_not_excuse_a_record_read() {
     run_expect_failure "fm-watch-sameline-$i.sh:$line" "$CHECK" --target "$copy"
     run_expect_failure "outside may_suppress_alarm" "$CHECK" --target "$copy"
   done
-  pass "an allowed name in a comment or string never excuses a record read sharing its line"
+  pass "nothing sharing a line - allowed name, string, trailing comment or a prefix-stripping hash - excuses a record read"
 }
 
 # The other way the check could pass vacuously: an owner that is gone or renamed.

@@ -23,6 +23,12 @@
 # explicit named allowance below rather than an implicit gap - an invisible
 # carve-out is how the busy-turn bypass survived three rounds.
 #
+# It bans the spelling in EVERY context - code, comment or string - because a
+# comment exemption needs a rule for where code ends, and every such rule this
+# guard tried was foolable by the very shape it exists to catch. Comments outside
+# the owner therefore name it by prose or by its function name, never by a banned
+# spelling.
+#
 # Structure only: it locates the owner and the reads, and never judges what the
 # owner does. Point --target at a copy to exercise the check itself.
 set -eu
@@ -100,14 +106,28 @@ def allowance_covers(line: str, match: re.Match) -> bool:
     return False
 
 
-def code_matches(line: str):
-    """Every banned occurrence <line> reads as code, skipping commented ones."""
-    return [m for m in BANNED_RE.finditer(line) if "#" not in line[: m.start()]]
+def occurrences(line: str):
+    """Every banned occurrence in <line>, in EVERY context.
+
+    There is deliberately no comment exemption and no string exemption. A guard
+    whose whole premise is that it must not be foolable cannot rest on a
+    heuristic for where code ends, and the obvious heuristic - treat a `#`
+    earlier in the line as a comment start - is wrong in exactly the way this
+    change has now been wrong four times, judging a LINE where it should judge an
+    OCCURRENCE: `local id=${1#state/}` puts a `#` in front of a real record read
+    and the read stops being seen. A cleverer heuristic is just another thing
+    that can be wrong the same way, so there is none.
+    The cost is that no comment outside the owner may name a banned spelling
+    literally; comments refer to the owner by prose or by its function name
+    instead. The property bought is total: there is no context whatsoever in
+    which a banned spelling can sit outside the owner and pass.
+    """
+    return list(BANNED_RE.finditer(line))
 
 
 def banned_read(line: str) -> str:
-    """The banned spelling <line> reads as code, or None when it reads none."""
-    for match in code_matches(line):
+    """The banned spelling <line> carries, or None when it carries none."""
+    for match in occurrences(line):
         if allowance_covers(line, match):
             continue
         return match.group(0)
@@ -116,7 +136,7 @@ def banned_read(line: str) -> str:
 
 def allowed_check_sweep(line: str) -> int:
     """How many of <line>'s banned occurrences the named allowance itself covers."""
-    return sum(1 for match in code_matches(line) if allowance_covers(line, match))
+    return sum(1 for match in occurrences(line) if allowance_covers(line, match))
 
 
 def owner_span(lines: list[str], target: str) -> tuple[int, int]:
@@ -162,11 +182,12 @@ def validate(target_path: Path) -> tuple[int, int, int]:
         if spelling is None:
             continue
         fail(
-            f"{target}:{number} reads the durable merge-poll record ({spelling}) "
+            f"{target}:{number} names the durable merge-poll record ({spelling}) "
             f"outside {OWNER} (lines {start}-{end}): {line.strip()} - every "
             f"suppression decision must ask {OWNER}, which requires the "
             f"classifier to agree the task is complete, so a parked, blocked or "
-            f"failed run is never silenced by a completion record"
+            f"failed run is never silenced by a completion record. A comment or "
+            f"string is not exempt: name the owner in prose instead"
         )
     if inside == 0:
         fail(

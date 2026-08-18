@@ -161,7 +161,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# wake) and never double-triages - and never runs the costly provably-working
+# read, on any path: the stale triage hands off before classifying, and the
+# busy-turn bound skips its suppression question for the same reason.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -309,6 +311,10 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # suppression question has to be answered HERE rather than before the timer
 # starts; see busy_turn_wedge_due for the one such caller and why. Omitted, this
 # behaves exactly as it always has.
+# That question is skipped entirely while away mode is active, for the same
+# reason the stale triage hands off to the daemon there: under afk the daemon
+# owns triage and this watcher must behave one-shot, so it neither pays the
+# authoritative read nor decides a suppression the daemon is the one to make.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> [suppress-task] [suppress-hash]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 stask=${5:-} shash=${6:-} since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -320,7 +326,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if [ -n "$stask" ] && may_suppress_alarm "$win" "$stask" "$shash"; then
+        if [ -n "$stask" ] && ! afk_present && may_suppress_alarm "$win" "$stask" "$shash"; then
           rm -f "$since_file" "$escalation_file"
           triage_log "absorbed $label at the escalation point (complete, awaiting merge/decision authority): $win"
           return
@@ -497,7 +503,11 @@ handle_complete_stale_quiet() {  # <window> <task> <hash>
 }
 
 # THE ONE OWNER OF ALARM SUPPRESSION, and the only place in this file allowed to
-# read the durable merge-poll record (fm_pr_merge_poll_armed). It answers exactly
+# read the task's durable merge-poll record. The body below is the sole site that
+# may name that record's armed-poll predicate at all, in any context;
+# bin/fm-watch-suppression-check.sh fails on the spelling appearing anywhere else
+# in this file, comments and strings included, so this sentence describes it
+# rather than quoting it. It answers exactly
 # one question - MAY this task's alarm be suppressed for this pane hash - and
 # every suppression decision in the file, without exception or carve-out, is that
 # answer: 0 suppress, 1 alarm.

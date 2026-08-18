@@ -1914,7 +1914,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
 # failed keeps the full ladder, exactly as the stale path already promises,
 # while an armed poll with no live reading left behind it stays exempt.
 test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid n
   dir=$(make_case busy-turn-age-failed-run); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-failed"
   printf 'Working...' > "$capture_file"
@@ -1941,25 +1941,43 @@ test_busy_pane_past_turn_age_bound_escalates_a_failed_run_behind_an_armed_poll()
     reap "$pid"; unset FM_FAKE_CREW_STATE
     fail "a failed run behind an armed poll escalated before the wedge threshold: $(cat "$out")"
   fi
-  [ -s "$state/.stale-since-$key" ] \
-    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "an armed merge poll exempted a FAILED run from the busy-turn-age bound"; }
+  # The timer now starts for EVERY busy over-age pane and the exemption is decided
+  # later, at the escalation point, so its presence no longer distinguishes exempt
+  # from not-exempt. What still can fail, and is what this test is about, is that
+  # the exemption is never GRANTED to a failed run: no completion agreement is
+  # recorded and the suppressing branch never runs.
   [ ! -e "$state/.complete-$key" ] \
     || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a failed run behind an armed poll was recorded as complete"; }
+  ! grep -F "at the escalation point" "$state/.watch-triage.log" >/dev/null 2>&1 \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "an armed merge poll exempted a FAILED run from the busy-turn-age bound"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional failed-run phase-A stop"
 
-  # Phase B: backdate the timer past the threshold; the ladder is intact.
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 40 || { unset FM_FAKE_CREW_STATE; fail "a failed run behind an armed poll never wedge-escalated past the turn-age bound"; }
+  # Phase B: the full ladder, climbing to the demand-deep-inspection threshold,
+  # which is the escalation an exemption would have swallowed.
+  n=1
+  while [ "$n" -le 3 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || { unset FM_FAKE_CREW_STATE; fail "a failed run behind an armed poll never wedge-escalated past the turn-age bound (round $n)"; }
+    grep -F "stale: $window" "$out" >/dev/null || fail "the failed run's busy turn-age escalation printed no stale wake (round $n)"
+    grep -F "possible wedge" "$out" >/dev/null || fail "the failed run's busy turn-age escalation did not flag a possible wedge (round $n)"
+    grep -F "escalation $n" "$out" >/dev/null || fail "the failed run's escalation count did not reach $n: $(cat "$out")"
+    if [ "$n" -ge 3 ]; then
+      grep -F "demand-deep-inspection" "$out" >/dev/null \
+        || fail "the failed run behind an armed poll never demanded deep inspection: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" || fail "could not acknowledge failed-run escalation round $n"
+    n=$((n + 1))
+  done
   unset FM_FAKE_CREW_STATE
-  grep -F "stale: $window" "$out" >/dev/null || fail "the failed run's busy turn-age escalation printed no stale wake"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the failed run's busy turn-age escalation did not flag a possible wedge"
+  [ ! -e "$state/.complete-$key" ] \
+    || fail "a failed run behind an armed poll was recorded as complete while escalating"
   pass "an armed merge poll never exempts a failed follow-up run from the busy-turn-age bound"
 }
 
@@ -2226,6 +2244,58 @@ SH
     || fail "the escalation decision point did not pay for a fresh authoritative read"
   [ ! -s "$out" ] || fail "the cost fixture woke on a durably complete busy pane: $(cat "$out")"
   pass "the authoritative completion read is paid only where an escalation is due, never per poll"
+}
+
+# The away-mode contract, which the escalation-point read has to respect like
+# every other costly read in this file: while state/.afk exists the daemon owns
+# triage and this watcher is one-shot, so it neither pays for the authoritative
+# read nor makes a suppression decision the daemon is the one to make.
+test_afk_skips_the_busy_turn_suppression_read() {
+  local dir state fakebin out capture_file window key pid calls
+  dir=$(make_case busy-turn-afk); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-afk"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-afk.meta"
+  record_pi_busy "$state" busy-afk
+  printf 'working: pushed and green, waiting on merge\n' > "$state/busy-afk.status"
+  printf '%s' "$(seen_sig "$state/busy-afk.status")" > "$state/.seen-busy-afk_status"
+  arm_merge_poll "$state" busy-afk
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/busy-afk.meta"
+
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s
+' "${1:-}" >> "$FM_CREW_STATE_CALL_LOG"
+printf '%s
+' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_CREW_STATE_CALL_LOG="$dir/crew-state.calls"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · backend target gone'
+  : > "$state/.afk"
+
+  # A timer already due: without afk this is exactly the poll that would pay for
+  # the authoritative read and suppress.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG; fail "the afk watcher never handed its busy-turn escalation to the daemon: $(cat "$out")"; }
+  calls=$(wc -l < "$FM_CREW_STATE_CALL_LOG" 2>/dev/null || echo 0)
+  calls=${calls//[[:space:]]/}
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALL_LOG
+  [ "${calls:-0}" -eq 0 ] \
+    || fail "away mode paid for $calls authoritative read(s) the daemon owns"
+  [ ! -e "$state/.complete-$key" ] \
+    || fail "away mode recorded a completion agreement the daemon owns"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "away mode swallowed the busy-turn escalation instead of handing it to the daemon: $(cat "$out")"
+  pass "away mode neither pays for the busy-turn suppression read nor decides it"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -2748,6 +2818,7 @@ test_busy_pane_past_turn_age_bound_exempts_a_durably_complete_task
 test_busy_pane_changing_hash_reaches_demand_deep_inspection_without_a_completion_record
 test_busy_pane_keeps_its_completion_exemption_across_a_changing_hash
 test_busy_turn_completion_read_is_paid_only_when_an_escalation_is_due
+test_afk_skips_the_busy_turn_suppression_read
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_task_awaiting_merge_is_absorbed_but_stuck_still_escalates
